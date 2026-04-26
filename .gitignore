@@ -6,12 +6,14 @@ dist/
 build/
 .venv/
 venv/
+*.egg
 
 # Node
 node_modules/
 frontend/dist/
+frontend/.vite/
 
-# Environment
+# Environment & Secrets
 .env
 *.env.local
 backend/.env
@@ -21,6 +23,7 @@ backend/.env
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
@@ -30,7 +33,21 @@ Thumbs.db
 postgres_data/
 redis_data/
 
-# Pytest
+# Pytest / Coverage
 .pytest_cache/
 htmlcov/
 .coverage
+.mypy_cache/
+
+# Kiro
+.kiro/
+
+# Build artifacts
+*.whl
+*.tar.gz
+
+# Logs
+*.log
+
+# Temporary
+/tmp/
