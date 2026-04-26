@@ -1,0 +1,159 @@
+"""
+自选股/股票池路由 - Watchlist Management
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from typing import Optional
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from db.database import get_db
+from db.models import User, Watchlist, WatchlistItem
+from api.auth import get_current_user
+
+router = APIRouter(prefix="/api/watchlist", tags=["自选股"])
+
+
+class AddItemRequest(BaseModel):
+    stock_code: str
+    stock_name: str = ""
+    added_reason: str = ""
+    target_price: Optional[float] = None
+    stop_loss_price: Optional[float] = None
+
+
+class CreateWatchlistRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+@router.get("/")
+async def get_watchlists(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """获取用户所有自选股列表"""
+    result = await db.execute(
+        select(Watchlist).where(Watchlist.user_id == current_user.id)
+    )
+    watchlists = result.scalars().all()
+
+    out = []
+    for w in watchlists:
+        items_result = await db.execute(
+            select(WatchlistItem).where(WatchlistItem.watchlist_id == w.id)
+        )
+        items = items_result.scalars().all()
+        out.append({
+            "id": str(w.id),
+            "name": w.name,
+            "description": w.description,
+            "is_default": w.is_default,
+            "items": [{
+                "id": str(it.id),
+                "stock_code": it.stock_code,
+                "stock_name": it.stock_name,
+                "added_reason": it.added_reason,
+                "target_price": it.target_price,
+                "stop_loss_price": it.stop_loss_price,
+                "added_at": it.added_at.isoformat() if it.added_at else "",
+            } for it in items],
+            "count": len(items),
+        })
+    return {"watchlists": out}
+
+
+@router.post("/")
+async def create_watchlist(
+    request: CreateWatchlistRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """创建新的自选股列表"""
+    wl = Watchlist(
+        user_id=current_user.id,
+        name=request.name,
+        description=request.description,
+    )
+    db.add(wl)
+    await db.commit()
+    await db.refresh(wl)
+    return {"id": str(wl.id), "name": wl.name, "message": "创建成功"}
+
+
+@router.post("/{watchlist_id}/add")
+async def add_stock(
+    watchlist_id: str,
+    request: AddItemRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """添加股票到自选"""
+    wl_result = await db.execute(
+        select(Watchlist).where(Watchlist.id == watchlist_id, Watchlist.user_id == current_user.id)
+    )
+    wl = wl_result.scalar_one_or_none()
+    if not wl:
+        raise HTTPException(status_code=404, detail="自选列表不存在")
+
+    # 检查是否已存在
+    existing = await db.execute(
+        select(WatchlistItem).where(
+            WatchlistItem.watchlist_id == wl.id,
+            WatchlistItem.stock_code == request.stock_code,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="该股票已在自选中")
+
+    item = WatchlistItem(
+        watchlist_id=wl.id,
+        stock_code=request.stock_code,
+        stock_name=request.stock_name,
+        added_reason=request.added_reason,
+        target_price=request.target_price,
+        stop_loss_price=request.stop_loss_price,
+    )
+    db.add(item)
+    await db.commit()
+    return {"message": f"{request.stock_name or request.stock_code} 已加入自选"}
+
+
+@router.delete("/{watchlist_id}/remove/{stock_code}")
+async def remove_stock(
+    watchlist_id: str,
+    stock_code: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """从自选中移除股票"""
+    result = await db.execute(
+        select(WatchlistItem).join(Watchlist).where(
+            WatchlistItem.watchlist_id == watchlist_id,
+            WatchlistItem.stock_code == stock_code,
+            Watchlist.user_id == current_user.id,
+        )
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="未找到该股票")
+    await db.delete(item)
+    await db.commit()
+    return {"message": f"{stock_code} 已从自选移除"}
+
+
+@router.get("/search-suggest")
+async def search_suggest(
+    q: str = "",
+    current_user: User = Depends(get_current_user),
+):
+    """股票搜索自动补全"""
+    if not q or len(q) < 1:
+        return {"suggestions": []}
+
+    from agents.skills.market_data_skill import search_stocks
+    results = search_stocks(q)
+    # 过滤掉error项
+    suggestions = [r for r in results if "error" not in r]
+    return {"suggestions": suggestions[:10]}
