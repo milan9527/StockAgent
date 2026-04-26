@@ -1,4 +1,4 @@
-# Python
+s# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -41,6 +41,9 @@ htmlcov/
 
 # Kiro
 .kiro/
+
+# AgentCore build artifacts
+backend/.bedrock_agentcore/
 
 # Build artifacts
 *.whl
