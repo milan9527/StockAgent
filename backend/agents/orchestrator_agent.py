@@ -28,50 +28,81 @@ from agents.skills.market_data_skill import (
 
 ORCHESTRATOR_SYSTEM_PROMPT = """你是证券交易助手平台的总编排Agent。
 
-你拥有以下工具(直接可用):
+## 你的直接工具
 - get_stock_realtime_quote: 获取股票实时行情
 - get_stock_batch_quotes: 批量获取行情
 - search_stocks: 搜索股票
-- browser: **AgentCore Browser** - 用于浏览网页、采集动态页面数据。当用户要求"用浏览器"或需要JavaScript渲染的页面时，必须使用此工具。
-- code_interpreter: **AgentCore Code Interpreter** - 用于执行Python代码、数据分析、可视化。当用户要求"执行代码"或需要复杂计算时，必须使用此工具。
+- browser: **AgentCore Browser** (速度较慢，仅在必要时使用)
+- code_interpreter: **AgentCore Code Interpreter** - 执行Python代码、数据分析、生成爬虫程序
 
-你管理三个专业子Agent(作为工具调用):
+## 你的专业子Agent(作为工具调用)
 - investment_analysis: 深度投资分析(行业+公司+技术面+估值+爬虫+Web搜索)
 - stock_trading: 交易策略和模拟盘
 - quant_trading: 量化策略和回测
 
-工具选择规则:
-1. 用户明确说"用浏览器"或"browser" → 直接调用 browser 工具
-2. 用户明确说"执行代码"或"code interpreter" → 直接调用 code_interpreter 工具
-3. 涉及投资分析/研究/新闻搜索 → 调用 investment_analysis
-4. 涉及交易/买卖/模拟盘 → 调用 stock_trading
-5. 涉及量化/回测/策略代码 → 调用 quant_trading
-6. 简单行情查询 → 直接用 get_stock_realtime_quote
+## ⚠️ 工具选择规则(按优先级)
 
-回复用中文Markdown格式。"""
+**最高优先级 - 用户明确指定工具:**
+1. 用户明确说"用浏览器"、"browser" → 直接调用 browser 工具
+2. 用户明确说"执行代码"、"code interpreter"、"运行代码" → 直接调用 code_interpreter 工具
+3. 用户说"用爬虫"、"爬取"、"crawler" → 先调用 investment_analysis(内含crawl工具)，如果数据不够全面，再用 code_interpreter 生成专业爬虫程序补充
+
+**普通优先级 - 用户未指定工具:**
+4. 涉及投资分析/深度研究/新闻搜索/公司分析 → 调用 investment_analysis
+5. 涉及交易/买卖/模拟盘/策略 → 调用 stock_trading
+6. 涉及量化/回测/策略代码 → 调用 quant_trading
+7. 简单行情查询 → 直接用 get_stock_realtime_quote
+
+## 🐍 Code Interpreter 爬虫能力
+当内置crawl工具数据不够全面时，使用 code_interpreter 生成并执行Python爬虫程序:
+- 用 requests + BeautifulSoup 爬取目标网站
+- 可爬取东方财富、新浪财经、同花顺、证券时报等财经网站
+- 可解析HTML提取新闻标题、内容、时间等结构化数据
+- 可同时爬取多个数据源进行汇总
+- 示例: 用户说"用爬虫获取固态电池最新动态" → 先用investment_analysis的crawl工具，然后用code_interpreter生成爬虫程序补充更多数据源
+
+## 🌐 Browser使用条件(速度较慢，谨慎使用)
+browser 仅在以下情况使用:
+- 用户**明确要求**使用浏览器
+- web_search/crawler获取的信息**不足或失败**，需要补充
+- 目标网页需要**JavaScript渲染**或**登录**
+
+**默认优先使用** investment_analysis 的 web_search/crawler，速度更快。回复用中文Markdown格式。"""
 
 
 def _build_browser_tool():
-    browser_id = os.environ.get("AGENTCORE_BROWSER_ID", "")
+    browser_id = os.environ.get("AGENTCORE_BROWSER_ID", "SecuritiesTradingBrowser-F6aHtUeGkj")
     if not browser_id:
         return None
     try:
         from strands_tools.browser import AgentCoreBrowser
-        return AgentCoreBrowser(region=os.environ.get("AWS_REGION", "us-east-1"), identifier=browser_id).browser
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        print(f"[Browser] Initializing with id={browser_id}, region={region}")
+        tool = AgentCoreBrowser(region=region, identifier=browser_id).browser
+        print(f"[Browser] Successfully loaded: {getattr(tool, 'name', 'browser')}")
+        return tool
     except Exception as e:
         print(f"[Browser] init failed: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
 def _build_code_interpreter_tool():
-    ci_id = os.environ.get("AGENTCORE_CODE_INTERPRETER_ID", "")
+    ci_id = os.environ.get("AGENTCORE_CODE_INTERPRETER_ID", "SecuritiesTradingCodeInterpreter-wGp9YodWEL")
     if not ci_id:
         return None
     try:
         from strands_tools.code_interpreter import AgentCoreCodeInterpreter
-        return AgentCoreCodeInterpreter(region=os.environ.get("AWS_REGION", "us-east-1"), identifier=ci_id).code_interpreter
+        region = os.environ.get("AWS_REGION", "us-east-1")
+        print(f"[CodeInterpreter] Initializing with id={ci_id}, region={region}")
+        tool = AgentCoreCodeInterpreter(region=region, identifier=ci_id).code_interpreter
+        print(f"[CodeInterpreter] Successfully loaded: {getattr(tool, 'name', 'code_interpreter')}")
+        return tool
     except Exception as e:
         print(f"[CodeInterpreter] init failed: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -86,18 +117,27 @@ def create_orchestrator_agent(session_id: str = "default", actor_id: str = "syst
     tools = [investment_analysis, stock_trading, quant_trading,
              get_stock_realtime_quote, get_stock_batch_quotes, search_stocks]
 
+    loaded_tools = []
     with tracer.start_as_current_span("load_agentcore_tools"):
         browser_tool = _build_browser_tool()
         if browser_tool:
             tools.append(browser_tool)
+            loaded_tools.append("browser")
             span.add_event("browser_loaded")
+        else:
+            print(f"[AgentCore] Browser NOT loaded. AGENTCORE_BROWSER_ID={os.environ.get('AGENTCORE_BROWSER_ID', '<not set>')}")
 
         ci_tool = _build_code_interpreter_tool()
         if ci_tool:
             tools.append(ci_tool)
+            loaded_tools.append("code_interpreter")
             span.add_event("code_interpreter_loaded")
+        else:
+            print(f"[AgentCore] CodeInterpreter NOT loaded. AGENTCORE_CODE_INTERPRETER_ID={os.environ.get('AGENTCORE_CODE_INTERPRETER_ID', '<not set>')}")
 
+    print(f"[AgentCore] Tools loaded: {len(tools)} total, AgentCore tools: {loaded_tools}")
     span.set_attribute("agent.tools_count", len(tools))
+    span.set_attribute("agent.agentcore_tools", str(loaded_tools))
 
     # Memory
     session_manager = None
@@ -124,7 +164,7 @@ def create_orchestrator_agent(session_id: str = "default", actor_id: str = "syst
 
 def _search_registry_skills(query: str) -> str:
     """Search AgentCore Registry for relevant skills and return context string"""
-    registry_id = os.environ.get("AGENTCORE_REGISTRY_ID", "")
+    registry_id = os.environ.get("AGENTCORE_REGISTRY_ID", "Eea8hqxihmpeJlYv")
     if not registry_id:
         return ""
     try:
@@ -178,7 +218,9 @@ def invoke(payload: dict):
             if registry_context:
                 enhanced_prompt = f"{prompt}\n{registry_context}"
 
+            print(f"[Invoke] prompt={prompt[:100]}... session={session_id} user={user_id}")
             agent = create_orchestrator_agent(session_id=session_id, actor_id=user_id)
+            print(f"[Invoke] Agent created with {len(agent.tool_registry.registry)} tools: {list(agent.tool_registry.registry.keys())}")
 
             with tracer.start_as_current_span("agent_run") as run_span:
                 response = agent(enhanced_prompt)
