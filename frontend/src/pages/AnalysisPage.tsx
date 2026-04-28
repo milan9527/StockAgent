@@ -71,17 +71,63 @@ export default function AnalysisPage() {
     setAgentLoading(true)
     setAgentResult('')
     try {
-      const res = await api.post('/api/analysis/agent', {
-        template_id: selectedTemplate,
-        prompt: agentPrompt,
-        stock_code: stockCode,
-        stock_name: stockName,
-      }, { timeout: 600000 })  // 10 min for deep analysis
-      if (res.data.error) {
-        setAgentResult(`⚠️ ${res.data.error}\n\n${res.data.detail || ''}`)
+      const token = (() => {
+        try { const s = localStorage.getItem('auth-storage'); return s ? JSON.parse(s).state?.token : '' } catch { return '' }
+      })()
+      const baseUrl = import.meta.env.VITE_API_URL || ''
+      const response = await fetch(`${baseUrl}/api/analysis/agent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ template_id: selectedTemplate, prompt: agentPrompt, stock_code: stockCode, stock_name: stockName }),
+      })
+
+      if (!response.ok) throw new Error(`Request failed with status ${response.status}`)
+
+      const contentType = response.headers.get('content-type') || ''
+      let resultData: any = null
+
+      if (contentType.includes('text/event-stream')) {
+        const reader = response.body?.getReader()
+        const decoder = new TextDecoder()
+        if (reader) {
+          let buffer = ''
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() || ''
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const parsed = JSON.parse(line.slice(6))
+                  if (parsed.type === 'result') resultData = parsed
+                } catch {}
+              }
+            }
+          }
+          if (!resultData && buffer.trim()) {
+            for (const line of buffer.split('\n')) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const parsed = JSON.parse(line.slice(6))
+                  if (parsed.type === 'result') resultData = parsed
+                } catch {}
+              }
+            }
+          }
+        }
       } else {
-        setAgentResult(res.data.response || '')
+        resultData = await response.json()
+      }
+
+      if (resultData?.error) {
+        setAgentResult(`⚠️ ${resultData.error}\n\n${resultData.detail || ''}`)
+      } else if (resultData?.response) {
+        setAgentResult(resultData.response)
         toast.success('AI分析完成')
+      } else {
+        throw new Error('No response received')
       }
       loadReports()
     } catch (err: any) {
@@ -262,9 +308,29 @@ export default function AnalysisPage() {
 
         {/* Agent分析结果 */}
         {agentResult && (
-          <div className="mt-4 bg-surface-hover rounded-lg p-4 border border-surface-border/50">
-            <h3 className="text-xs text-gray-500 mb-2">📋 AI分析结果</h3>
-            <div className="prose prose-invert prose-sm max-w-none text-gray-300 text-sm">
+          <div className="mt-4 rounded-xl border border-accent-gold/20 overflow-hidden">
+            <div className="bg-gradient-to-r from-accent-gold/10 to-transparent px-5 py-3 border-b border-accent-gold/20 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-accent-gold flex items-center gap-2">📋 AI深度分析报告</h3>
+              <span className="text-[10px] text-gray-500">AgentCore Runtime · Registry Smart Select</span>
+            </div>
+            <div className="p-5 bg-surface-card/50
+              prose prose-invert max-w-none
+              prose-headings:text-accent-gold prose-headings:font-bold prose-headings:border-b prose-headings:border-surface-border prose-headings:pb-2 prose-headings:mb-3
+              prose-h1:text-xl prose-h1:mt-6 prose-h2:text-lg prose-h2:mt-5 prose-h3:text-base prose-h3:mt-4 prose-h3:border-none
+              prose-p:text-gray-300 prose-p:leading-relaxed prose-p:text-sm
+              prose-strong:text-white
+              prose-table:text-xs prose-table:border-collapse prose-table:w-full
+              prose-thead:bg-surface-hover prose-thead:text-gray-400
+              prose-th:px-3 prose-th:py-2 prose-th:text-left prose-th:border prose-th:border-surface-border prose-th:font-semibold
+              prose-td:px-3 prose-td:py-2 prose-td:border prose-td:border-surface-border prose-td:text-gray-300
+              prose-tr:even:bg-surface-hover/30
+              prose-li:text-gray-300 prose-li:text-sm prose-li:leading-relaxed
+              prose-blockquote:border-l-accent-gold prose-blockquote:bg-accent-gold/5 prose-blockquote:text-gray-400 prose-blockquote:rounded-r-lg prose-blockquote:py-1 prose-blockquote:px-4
+              prose-hr:border-surface-border
+              prose-a:text-primary-400 prose-a:no-underline hover:prose-a:text-primary-300
+              prose-code:text-accent-gold prose-code:bg-surface-hover prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-xs
+              text-sm
+            ">
               <ReactMarkdown>{agentResult}</ReactMarkdown>
             </div>
           </div>
@@ -316,9 +382,25 @@ export default function AnalysisPage() {
             ))}
           </div>
           {viewReport && (
-            <div className="mt-3 bg-surface-hover rounded-lg p-4 border border-surface-border/50">
-              <h3 className="text-sm text-white font-medium mb-2">{viewReport.title}</h3>
-              <div className="prose prose-invert prose-sm max-w-none text-gray-300 text-xs max-h-96 overflow-y-auto">
+            <div className="mt-3 rounded-xl border border-surface-border overflow-hidden">
+              <div className="bg-surface-hover px-4 py-2 border-b border-surface-border flex items-center justify-between">
+                <h3 className="text-sm text-white font-medium">{viewReport.title}</h3>
+                <span className="text-[10px] text-gray-600">{viewReport.created_at?.split('T')[0]}</span>
+              </div>
+              <div className="p-4 max-h-[500px] overflow-y-auto
+                prose prose-invert max-w-none
+                prose-headings:text-accent-gold prose-headings:font-bold prose-headings:border-b prose-headings:border-surface-border prose-headings:pb-2 prose-headings:mb-3
+                prose-h2:text-base prose-h3:text-sm prose-h3:border-none
+                prose-p:text-gray-300 prose-p:leading-relaxed prose-p:text-xs
+                prose-strong:text-white
+                prose-table:text-xs prose-table:border-collapse prose-table:w-full
+                prose-thead:bg-surface-hover prose-th:px-2 prose-th:py-1.5 prose-th:border prose-th:border-surface-border
+                prose-td:px-2 prose-td:py-1.5 prose-td:border prose-td:border-surface-border prose-td:text-gray-300
+                prose-li:text-gray-300 prose-li:text-xs
+                prose-blockquote:border-l-accent-gold prose-blockquote:bg-accent-gold/5 prose-blockquote:text-gray-400
+                prose-hr:border-surface-border
+                text-xs
+              ">
                 <ReactMarkdown>{viewReport.content || viewReport.summary}</ReactMarkdown>
               </div>
             </div>

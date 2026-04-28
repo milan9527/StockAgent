@@ -339,7 +339,19 @@ export default function ChatPage() {
               )}
               <div className={`max-w-[75%] rounded-xl px-4 py-3 ${msg.role === 'user' ? 'bg-primary-500/20 border border-primary-500/30' : 'bg-surface-card border border-surface-border'}`}>
                 {msg.role === 'assistant' ? (
-                  <div className="prose prose-invert prose-sm max-w-none prose-headings:text-accent-gold prose-headings:font-semibold prose-strong:text-white prose-p:text-gray-300 prose-p:leading-relaxed prose-table:text-xs prose-th:text-gray-400 prose-td:text-gray-300 prose-hr:border-surface-border text-sm">
+                  <div className="prose prose-invert prose-sm max-w-none
+                    prose-headings:text-accent-gold prose-headings:font-semibold
+                    prose-strong:text-white
+                    prose-p:text-gray-300 prose-p:leading-relaxed
+                    prose-table:text-xs prose-table:border-collapse prose-table:w-full
+                    prose-thead:bg-surface-hover/50
+                    prose-th:px-2 prose-th:py-1.5 prose-th:text-left prose-th:border prose-th:border-surface-border/50 prose-th:text-gray-400 prose-th:font-semibold
+                    prose-td:px-2 prose-td:py-1.5 prose-td:border prose-td:border-surface-border/50 prose-td:text-gray-300
+                    prose-li:text-gray-300 prose-li:leading-relaxed
+                    prose-blockquote:border-l-accent-gold prose-blockquote:bg-accent-gold/5 prose-blockquote:text-gray-400
+                    prose-hr:border-surface-border
+                    prose-code:text-accent-gold prose-code:bg-surface-hover prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-xs
+                    text-sm">
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
                   </div>
                 ) : (

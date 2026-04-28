@@ -156,9 +156,13 @@ async def agent_analysis(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """使用AI Agent进行深度分析（需要LLM）"""
+    """使用AI Agent进行深度分析 - SSE流式 + Registry Smart Select"""
+    import asyncio
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    from db.database import AsyncSessionLocal
+
     try:
-        import asyncio
         from config.settings import get_settings
         _settings = get_settings()
 
@@ -177,49 +181,105 @@ async def agent_analysis(
         if not prompt:
             return {"error": "请提供分析需求或选择分析模板"}
 
+        # Registry Smart Select
+        registry_context = ""
+        registry_id = _settings.AGENTCORE_REGISTRY_ID
+        if registry_id:
+            try:
+                import boto3
+                client = boto3.client("bedrock-agentcore", region_name=_settings.AWS_REGION)
+                registry_arn = f"arn:aws:bedrock-agentcore:{_settings.AWS_REGION}:632930644527:registry/{registry_id}"
+                resp = client.search_registry_records(
+                    registryIds=[registry_arn], searchQuery=prompt[:200], maxResults=5,
+                )
+                records = resp.get("registryRecords", [])
+                if records:
+                    lines = ["\n[Registry Smart Select - 相关Skills:]"]
+                    for rec in records:
+                        lines.append(f"- {rec.get('name', '')}: {rec.get('description', '')[:100]}")
+                    registry_context = "\n".join(lines)
+            except Exception as e:
+                print(f"[Analysis Registry Search] {e}")
+
         context = (
             f"[用户: {current_user.full_name or current_user.username}, "
-            f"风险偏好: {current_user.risk_preference}]\n\n{prompt}"
+            f"风险偏好: {current_user.risk_preference}]\n\n{prompt}{registry_context}"
         )
 
-        # 通过AgentCore Runtime调用 (run in thread to not block async)
-        from agents.runtime_client import invoke_runtime_agent
-        response_text = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: invoke_runtime_agent(
-                prompt=context,
-                session_id=f"analysis-{current_user.id}",
-                user_id=str(current_user.id),
+        # Save user_id for DB save in generator
+        user_id = current_user.id
+
+        async def generate():
+            """SSE stream with keepalive pings."""
+            import concurrent.futures
+
+            yield f"data: {_json.dumps({'type': 'ping', 'elapsed': 0})}\n\n"
+
+            loop = asyncio.get_event_loop()
+            from agents.runtime_client import invoke_runtime_agent
+            future = loop.run_in_executor(
+                None,
+                lambda: invoke_runtime_agent(
+                    prompt=context,
+                    session_id=f"analysis-{user_id}-{uuid.uuid4().hex[:8]}",
+                    user_id=str(user_id),
+                )
             )
-        )
 
-        # 保存报告
-        db_report = InvestmentReport(
-            user_id=current_user.id,
-            title=f"AI深度分析: {request.stock_name or request.sector or '市场分析'}",
-            report_type="agent",
-            content=response_text,
-            summary=response_text[:200],
-            stock_codes=[request.stock_code] if request.stock_code else [],
-        )
-        db.add(db_report)
-        await db.commit()
+            elapsed = 0
+            while not future.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(future), timeout=10)
+                    break
+                except asyncio.TimeoutError:
+                    elapsed += 10
+                    yield f"data: {_json.dumps({'type': 'ping', 'elapsed': elapsed})}\n\n"
 
-        return {
-            "response": response_text,
-            "report_id": str(db_report.id),
-            "template_id": request.template_id,
-        }
+            try:
+                response_text = await future
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[Agent Analysis Error] {error_msg}\n{traceback.format_exc()}")
+                response_text = f"⚠️ 分析失败: {error_msg[:300]}"
+
+            # Save report to DB
+            try:
+                async with AsyncSessionLocal() as save_db:
+                    db_report = InvestmentReport(
+                        user_id=user_id,
+                        title=f"AI深度分析: {request.stock_name or request.sector or '市场分析'}",
+                        report_type="agent",
+                        content=response_text,
+                        summary=response_text[:200],
+                        stock_codes=[request.stock_code] if request.stock_code else [],
+                    )
+                    save_db.add(db_report)
+                    await save_db.commit()
+                    report_id = str(db_report.id)
+            except Exception:
+                report_id = ""
+
+            result = _json.dumps({
+                "type": "result",
+                "response": response_text,
+                "report_id": report_id,
+                "template_id": request.template_id,
+            }, ensure_ascii=False)
+            yield f"data: {result}\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
     except Exception as e:
         error_msg = str(e)
         print(f"[Agent Analysis Error] {error_msg}\n{traceback.format_exc()}")
-
-        if "ValidationException" in error_msg or "AccessDenied" in error_msg:
-            return {
-                "error": "LLM模型调用失败，请检查AWS Bedrock模型访问权限",
-                "detail": error_msg[:300],
-            }
         return {"error": f"分析失败: {error_msg[:300]}"}
 
 
