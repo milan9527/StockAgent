@@ -9,68 +9,91 @@ from strands import tool
 
 @tool
 def analyze_technical_indicators(stock_code: str) -> dict:
-    """计算股票技术指标(MA, MACD, RSI, BOLL)，自动获取K线数据
+    """多周期技术指标分析(日线/周线/月线, MA/MACD/RSI/KDJ/BOLL)
 
     Args:
-        stock_code: 股票代码，如 "600519" 或 "sh600519"
+        stock_code: 股票代码, 如 "600519" 或 "sh600519"
     """
     import numpy as np
     from agents.skills.market_data_skill import get_stock_kline
 
-    # 自动获取K线数据
-    kline_result = get_stock_kline(stock_code, "day", 60)
-    kline_data = kline_result.get("data", [])
+    result = {"stock_code": stock_code, "timeframes": {}}
 
-    if not kline_data or len(kline_data) < 26:
-        return {"error": "K线数据不足", "stock_code": stock_code}
+    for tf, tf_name, count in [("day", "日线", 120), ("week", "周线", 60), ("month", "月线", 36)]:
+        kline_result = get_stock_kline(stock_code, tf, count)
+        kline_data = kline_result.get("data", [])
 
-    closes = np.array([d["close"] for d in kline_data], dtype=float)
-    highs = np.array([d["high"] for d in kline_data], dtype=float)
-    lows = np.array([d["low"] for d in kline_data], dtype=float)
+        if not kline_data or len(kline_data) < 26:
+            result["timeframes"][tf_name] = {"error": "数据不足"}
+            continue
 
-    ma5 = float(np.mean(closes[-5:]))
-    ma10 = float(np.mean(closes[-10:]))
-    ma20 = float(np.mean(closes[-20:]))
+        closes = np.array([d["close"] for d in kline_data], dtype=float)
+        highs = np.array([d["high"] for d in kline_data], dtype=float)
+        lows = np.array([d["low"] for d in kline_data], dtype=float)
+        current = float(closes[-1])
 
-    ema12 = _ema(closes, 12)
-    ema26 = _ema(closes, 26)
-    dif = ema12 - ema26
-    dea = _ema(dif, 9)
-    macd_hist = 2 * (dif - dea)
+        # MA
+        ma5 = float(np.mean(closes[-5:])) if len(closes) >= 5 else current
+        ma10 = float(np.mean(closes[-10:])) if len(closes) >= 10 else current
+        ma20 = float(np.mean(closes[-20:])) if len(closes) >= 20 else current
+        ma60 = float(np.mean(closes[-60:])) if len(closes) >= 60 else current
 
-    rsi14 = _compute_rsi(closes, 14)
+        trend = "震荡"
+        if ma5 > ma10 > ma20: trend = "多头排列"
+        elif ma5 < ma10 < ma20: trend = "空头排列"
 
-    std20 = float(np.std(closes[-20:]))
-    boll_mid = float(np.mean(closes[-20:]))
-    boll_upper = round(boll_mid + 2 * std20, 2)
-    boll_lower = round(boll_mid - 2 * std20, 2)
+        # MACD
+        ema12 = _ema(closes, 12)
+        ema26 = _ema(closes, 26)
+        dif = ema12 - ema26
+        dea = _ema(dif, 9)
+        macd_signal = "持续"
+        if len(dif) >= 2:
+            if dif[-1] > dea[-1] and dif[-2] <= dea[-2]: macd_signal = "金叉"
+            elif dif[-1] < dea[-1] and dif[-2] >= dea[-2]: macd_signal = "死叉"
 
-    current = float(closes[-1])
+        # RSI
+        rsi14 = _compute_rsi(closes, 14)
+        rsi_status = "超买" if rsi14 > 70 else "超卖" if rsi14 < 30 else "正常"
 
-    trend = "震荡"
-    if ma5 > ma10 > ma20:
-        trend = "多头排列(上涨)"
-    elif ma5 < ma10 < ma20:
-        trend = "空头排列(下跌)"
+        # KDJ
+        k, d, j = _compute_kdj(highs, lows, closes)
+        kdj_signal = "中性"
+        if len(k) >= 2:
+            if k[-1] > d[-1] and k[-2] <= d[-2]: kdj_signal = "金叉"
+            elif k[-1] < d[-1] and k[-2] >= d[-2]: kdj_signal = "死叉"
+        if j[-1] > 80: kdj_signal += "(超买)"
+        elif j[-1] < 20: kdj_signal += "(超卖)"
 
-    macd_signal = "持续"
-    if dif[-1] > dea[-1] and dif[-2] <= dea[-2]:
-        macd_signal = "金叉"
-    elif dif[-1] < dea[-1] and dif[-2] >= dea[-2]:
-        macd_signal = "死叉"
+        # BOLL
+        std20 = float(np.std(closes[-20:])) if len(closes) >= 20 else 0
+        boll_mid = float(np.mean(closes[-20:])) if len(closes) >= 20 else current
+        boll_upper = round(boll_mid + 2 * std20, 2)
+        boll_lower = round(boll_mid - 2 * std20, 2)
+        boll_pos = "上轨" if current > boll_upper * 0.98 else "下轨" if current < boll_lower * 1.02 else "中轨"
 
-    return {
-        "stock_code": stock_code,
-        "price": current,
-        "trend": trend,
-        "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2),
-        "macd_signal": macd_signal,
-        "macd_dif": round(float(dif[-1]), 2),
-        "rsi14": round(rsi14, 1),
-        "rsi_status": "超买" if rsi14 > 70 else "超卖" if rsi14 < 30 else "正常",
-        "boll_upper": boll_upper, "boll_mid": round(boll_mid, 2), "boll_lower": boll_lower,
-        "boll_position": "上轨" if current > boll_upper * 0.98 else "下轨" if current < boll_lower * 1.02 else "中轨区间",
+        result["timeframes"][tf_name] = {
+            "price": current,
+            "trend": trend,
+            "ma5": round(ma5, 2), "ma10": round(ma10, 2), "ma20": round(ma20, 2), "ma60": round(ma60, 2),
+            "macd": {"dif": round(float(dif[-1]), 3), "dea": round(float(dea[-1]), 3), "signal": macd_signal},
+            "rsi14": round(rsi14, 1), "rsi_status": rsi_status,
+            "kdj": {"k": round(float(k[-1]), 1), "d": round(float(d[-1]), 1), "j": round(float(j[-1]), 1), "signal": kdj_signal},
+            "boll": {"upper": boll_upper, "mid": round(boll_mid, 2), "lower": boll_lower, "position": boll_pos},
+        }
+
+    # Summary
+    daily = result["timeframes"].get("日线", {})
+    result["summary"] = {
+        "price": daily.get("price", 0),
+        "trend": daily.get("trend", "未知"),
+        "macd_signal": daily.get("macd", {}).get("signal", "未知"),
+        "rsi14": daily.get("rsi14", 0),
+        "rsi_status": daily.get("rsi_status", "未知"),
+        "kdj_signal": daily.get("kdj", {}).get("signal", "未知"),
+        "boll_position": daily.get("boll", {}).get("position", "未知"),
     }
+    return result
 
 
 @tool
@@ -136,3 +159,20 @@ def _compute_rsi(closes, period=14):
     avg_loss = np.mean(losses[-period:])
     if avg_loss == 0: return 100.0
     return float(100 - (100 / (1 + avg_gain / avg_loss)))
+
+
+def _compute_kdj(highs, lows, closes, n=9, m1=3, m2=3):
+    """计算KDJ指标"""
+    import numpy as np
+    length = len(closes)
+    k = np.full(length, 50.0)
+    d = np.full(length, 50.0)
+    j = np.full(length, 50.0)
+    for i in range(n - 1, length):
+        hn = np.max(highs[i - n + 1:i + 1])
+        ln = np.min(lows[i - n + 1:i + 1])
+        rsv = 100 * (closes[i] - ln) / (hn - ln) if hn != ln else 50
+        k[i] = (m1 - 1) / m1 * k[i - 1] + 1 / m1 * rsv if i > n - 1 else rsv
+        d[i] = (m2 - 1) / m2 * d[i - 1] + 1 / m2 * k[i] if i > n - 1 else k[i]
+        j[i] = 3 * k[i] - 2 * d[i]
+    return k, d, j

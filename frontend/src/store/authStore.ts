@@ -28,7 +28,7 @@ export const useAuthStore = create<AuthState>()(
 
       login: async (username: string, password: string) => {
         const res = await api.post('/api/auth/login', { username, password })
-        const { access_token, user_id, username: uname } = res.data
+        const { access_token } = res.data
         set({ token: access_token, isAuthenticated: true })
         api.defaults.headers.common['Authorization'] = `Bearer ${access_token}`
         await get().fetchUser()
@@ -42,15 +42,23 @@ export const useAuthStore = create<AuthState>()(
       fetchUser: async () => {
         try {
           const res = await api.get('/api/auth/me')
-          set({ user: res.data })
+          set({ user: res.data, isAuthenticated: true })
         } catch {
           set({ token: null, user: null, isAuthenticated: false })
+          delete api.defaults.headers.common['Authorization']
         }
       },
     }),
     {
       name: 'auth-storage',
-      partialize: (state) => ({ token: state.token }),
+      partialize: (state) => ({ token: state.token, isAuthenticated: state.isAuthenticated }),
+      onRehydrateStorage: () => (state) => {
+        // After rehydration, if token exists, restore auth header and validate
+        if (state?.token) {
+          api.defaults.headers.common['Authorization'] = `Bearer ${state.token}`
+          state.fetchUser()
+        }
+      },
     }
   )
 )

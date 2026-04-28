@@ -365,3 +365,51 @@ class ChatMessage(Base):
     content = Column(Text, default="")
     agent_type = Column(String(50), default="orchestrator")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ═══════════════════════════════════════════════════════
+# 文档管理 & 知识库
+# ═══════════════════════════════════════════════════════
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    title = Column(String(300), nullable=False)
+    category = Column(String(50), default="general")  # analysis, strategy, quant, market, research, imported
+    content = Column(Text, default="")
+    file_path = Column(String(500), default="")  # AgentCore Runtime Session Storage path
+    file_type = Column(String(20), default="md")  # md, html, pdf, txt
+    file_size = Column(Integer, default=0)
+    tags = Column(JSON, default=list)
+    source = Column(String(50), default="system")  # system, user, agent, imported
+    session_id = Column(String(100), default="")  # AgentCore Runtime session for storage access
+    is_in_knowledge_base = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_documents_user_category", "user_id", "category"),
+    )
+
+
+class KnowledgeChunk(Base):
+    __tablename__ = "knowledge_chunks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), nullable=False)
+    chunk_index = Column(Integer, default=0)
+    content = Column(Text, nullable=False)
+    chunk_meta = Column("metadata", JSON, default=dict)  # title, category, tags, source
+    embedding_model = Column(String(100), default="amazon.titan-embed-text-v2:0")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Note: embedding vector column added via raw SQL (pgvector)
+    # ALTER TABLE knowledge_chunks ADD COLUMN embedding vector(1024);
+
+    __table_args__ = (
+        Index("ix_knowledge_chunks_user", "user_id"),
+        Index("ix_knowledge_chunks_document", "document_id"),
+    )

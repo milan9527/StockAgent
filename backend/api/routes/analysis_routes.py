@@ -242,18 +242,53 @@ async def agent_analysis(
                 print(f"[Agent Analysis Error] {error_msg}\n{traceback.format_exc()}")
                 response_text = f"⚠️ 分析失败: {error_msg[:300]}"
 
-            # Save report to DB
+            # Convert Markdown to styled HTML
+            try:
+                import markdown as _md
+                html_body = _md.markdown(response_text, extensions=['tables', 'fenced_code', 'nl2br'])
+                html_response = f'''<div class="report"><style>
+.report table{{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}}
+.report th{{background:#1a1a2e;color:#d4a843;padding:8px 12px;border:1px solid #2d2d3d;text-align:left;font-weight:600}}
+.report td{{padding:8px 12px;border:1px solid #2d2d3d;color:#d1d5db}}
+.report tr:nth-child(even){{background:rgba(30,30,46,0.3)}}
+.report h2{{color:#d4a843;font-size:18px;border-bottom:1px solid #2d2d3d;padding-bottom:8px;margin:20px 0 12px}}
+.report h3{{color:#d4a843;font-size:15px;margin:16px 0 8px}}
+.report strong{{color:#fff}}
+.report blockquote{{border-left:3px solid #d4a843;padding:8px 16px;margin:12px 0;color:#9ca3af;background:rgba(212,168,67,0.05);border-radius:0 8px 8px 0}}
+.report p{{color:#d1d5db;line-height:1.7;margin:8px 0}}
+.report ul,.report ol{{padding-left:20px;color:#d1d5db}}
+.report li{{margin:4px 0;color:#d1d5db}}
+</style>{html_body}</div>'''
+            except Exception as md_err:
+                print(f"[MD→HTML] Conversion failed: {md_err}")
+                html_response = response_text
+
+            # Save report to DB + Document
             try:
                 async with AsyncSessionLocal() as save_db:
                     db_report = InvestmentReport(
                         user_id=user_id,
                         title=f"AI深度分析: {request.stock_name or request.sector or '市场分析'}",
                         report_type="agent",
-                        content=response_text,
+                        content=html_response,
                         summary=response_text[:200],
                         stock_codes=[request.stock_code] if request.stock_code else [],
                     )
                     save_db.add(db_report)
+
+                    # Also save as document
+                    from db.models import Document
+                    doc = Document(
+                        user_id=user_id,
+                        title=f"AI深度分析: {request.stock_name or request.sector or '市场分析'}",
+                        category="analysis",
+                        content=html_response,
+                        file_type="html",
+                        file_size=len(html_response.encode("utf-8")),
+                        tags=[request.stock_code] if request.stock_code else ["market"],
+                        source="agent",
+                    )
+                    save_db.add(doc)
                     await save_db.commit()
                     report_id = str(db_report.id)
             except Exception:
@@ -261,7 +296,7 @@ async def agent_analysis(
 
             result = _json.dumps({
                 "type": "result",
-                "response": response_text,
+                "response": html_response,
                 "report_id": report_id,
                 "template_id": request.template_id,
             }, ensure_ascii=False)
@@ -305,6 +340,27 @@ async def get_reports(
         "recommendations": r.recommendations,
         "created_at": r.created_at.isoformat() if r.created_at else "",
     } for r in reports]}
+
+
+@router.delete("/reports/{report_id}")
+async def delete_report(
+    report_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除分析报告"""
+    result = await db.execute(
+        select(InvestmentReport).where(
+            InvestmentReport.id == report_id,
+            InvestmentReport.user_id == current_user.id,
+        )
+    )
+    report = result.scalar_one_or_none()
+    if not report:
+        return {"error": "报告不存在"}
+    await db.delete(report)
+    await db.commit()
+    return {"success": True}
 
 
 @router.post("/web-search")

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { FileSearch, TrendingUp, Globe, AlertTriangle, Newspaper, Sparkles, LayoutTemplate, Send } from 'lucide-react'
+import { FileSearch, TrendingUp, Globe, AlertTriangle, Newspaper, Sparkles, LayoutTemplate, Send, Trash2, Database } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import StockSearch from '../components/StockSearch'
 import api from '../services/api'
@@ -310,29 +310,30 @@ export default function AnalysisPage() {
         {agentResult && (
           <div className="mt-4 rounded-xl border border-accent-gold/20 overflow-hidden">
             <div className="bg-gradient-to-r from-accent-gold/10 to-transparent px-5 py-3 border-b border-accent-gold/20 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-accent-gold flex items-center gap-2">📋 AI深度分析报告</h3>
-              <span className="text-[10px] text-gray-500">AgentCore Runtime · Registry Smart Select</span>
+              <h3 className="text-sm font-semibold text-accent-gold">AI深度分析报告</h3>
+              <div className="flex items-center gap-2">
+                <button onClick={async () => {
+                  try {
+                    await api.post('/api/documents/', {
+                      title: `分析报告: ${stockName || agentPrompt.slice(0, 30)}`,
+                      category: 'analysis', content: agentResult,
+                      tags: stockCode ? [stockCode] : [], source: 'agent', add_to_kb: true,
+                    })
+                    toast.success('已保存到文档知识库')
+                  } catch { toast.error('保存失败') }
+                }} className="text-[10px] px-2 py-1 bg-primary-500/20 text-primary-300 rounded hover:bg-primary-500/30">
+                  保存到知识库
+                </button>
+                <span className="text-[10px] text-gray-500">AgentCore Runtime</span>
+              </div>
             </div>
-            <div className="p-5 bg-surface-card/50
-              prose prose-invert max-w-none
-              prose-headings:text-accent-gold prose-headings:font-bold prose-headings:border-b prose-headings:border-surface-border prose-headings:pb-2 prose-headings:mb-3
-              prose-h1:text-xl prose-h1:mt-6 prose-h2:text-lg prose-h2:mt-5 prose-h3:text-base prose-h3:mt-4 prose-h3:border-none
-              prose-p:text-gray-300 prose-p:leading-relaxed prose-p:text-sm
-              prose-strong:text-white
-              prose-table:text-xs prose-table:border-collapse prose-table:w-full
-              prose-thead:bg-surface-hover prose-thead:text-gray-400
-              prose-th:px-3 prose-th:py-2 prose-th:text-left prose-th:border prose-th:border-surface-border prose-th:font-semibold
-              prose-td:px-3 prose-td:py-2 prose-td:border prose-td:border-surface-border prose-td:text-gray-300
-              prose-tr:even:bg-surface-hover/30
-              prose-li:text-gray-300 prose-li:text-sm prose-li:leading-relaxed
-              prose-blockquote:border-l-accent-gold prose-blockquote:bg-accent-gold/5 prose-blockquote:text-gray-400 prose-blockquote:rounded-r-lg prose-blockquote:py-1 prose-blockquote:px-4
-              prose-hr:border-surface-border
-              prose-a:text-primary-400 prose-a:no-underline hover:prose-a:text-primary-300
-              prose-code:text-accent-gold prose-code:bg-surface-hover prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-xs
-              text-sm
-            ">
-              <ReactMarkdown>{agentResult}</ReactMarkdown>
-            </div>
+            {agentResult.includes('<div class="report"') || agentResult.includes('<table') ? (
+              <div className="p-5 bg-surface-card/50" dangerouslySetInnerHTML={{ __html: agentResult }} />
+            ) : (
+              <div className="report-container p-5 bg-surface-card/50">
+                <ReactMarkdown>{agentResult}</ReactMarkdown>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -367,16 +368,39 @@ export default function AnalysisPage() {
           <h2 className="text-sm font-semibold text-gray-400 mb-3">历史分析报告 ({reports.length})</h2>
           <div className="space-y-2">
             {reports.map((r: any) => (
-              <div key={r.id} className="flex items-center justify-between py-2 border-b border-surface-border/50 cursor-pointer hover:bg-surface-hover/50 px-2 rounded" onClick={() => setViewReport(viewReport?.id === r.id ? null : r)}>
-                <div className="flex-1">
+              <div key={r.id} className="group flex items-center justify-between py-2 border-b border-surface-border/50 hover:bg-surface-hover/50 px-2 rounded">
+                <div className="flex-1 cursor-pointer" onClick={() => setViewReport(viewReport?.id === r.id ? null : r)}>
                   <p className="text-sm text-white">{r.title}</p>
                   <p className="text-xs text-gray-500">{r.summary?.slice(0, 100)}</p>
                 </div>
-                <div className="text-right flex-shrink-0 ml-4">
+                <div className="flex items-center gap-2 flex-shrink-0 ml-4">
                   <span className={`text-[10px] px-1.5 py-0.5 rounded ${r.report_type === 'agent' ? 'bg-accent-gold/20 text-accent-gold' : 'bg-surface-hover text-gray-500'}`}>
                     {r.report_type === 'agent' ? 'AI分析' : '快速分析'}
                   </span>
-                  <p className="text-[10px] text-gray-600 mt-1">{r.created_at?.split('T')[0]}</p>
+                  <p className="text-[10px] text-gray-600">{r.created_at?.split('T')[0]}</p>
+                  <button onClick={async (e) => {
+                    e.stopPropagation()
+                    try {
+                      await api.post('/api/documents/', {
+                        title: r.title, category: 'analysis', content: r.content || r.summary,
+                        tags: r.stock_codes || [], source: 'agent', add_to_kb: true,
+                      })
+                      toast.success('已添加到文档知识库')
+                    } catch { toast.error('添加失败') }
+                  }} className="opacity-0 group-hover:opacity-100 text-[10px] px-1.5 py-0.5 bg-primary-500/20 text-primary-300 rounded hover:bg-primary-500/30 flex items-center gap-0.5">
+                    <Database className="w-3 h-3" /> KB
+                  </button>
+                  <button onClick={async (e) => {
+                    e.stopPropagation()
+                    try {
+                      await api.delete(`/api/analysis/reports/${r.id}`)
+                      setReports(prev => prev.filter(x => x.id !== r.id))
+                      if (viewReport?.id === r.id) setViewReport(null)
+                      toast.success('已删除')
+                    } catch { toast.error('删除失败') }
+                  }} className="opacity-0 group-hover:opacity-100 p-0.5 text-gray-600 hover:text-red-400">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               </div>
             ))}
@@ -387,22 +411,13 @@ export default function AnalysisPage() {
                 <h3 className="text-sm text-white font-medium">{viewReport.title}</h3>
                 <span className="text-[10px] text-gray-600">{viewReport.created_at?.split('T')[0]}</span>
               </div>
-              <div className="p-4 max-h-[500px] overflow-y-auto
-                prose prose-invert max-w-none
-                prose-headings:text-accent-gold prose-headings:font-bold prose-headings:border-b prose-headings:border-surface-border prose-headings:pb-2 prose-headings:mb-3
-                prose-h2:text-base prose-h3:text-sm prose-h3:border-none
-                prose-p:text-gray-300 prose-p:leading-relaxed prose-p:text-xs
-                prose-strong:text-white
-                prose-table:text-xs prose-table:border-collapse prose-table:w-full
-                prose-thead:bg-surface-hover prose-th:px-2 prose-th:py-1.5 prose-th:border prose-th:border-surface-border
-                prose-td:px-2 prose-td:py-1.5 prose-td:border prose-td:border-surface-border prose-td:text-gray-300
-                prose-li:text-gray-300 prose-li:text-xs
-                prose-blockquote:border-l-accent-gold prose-blockquote:bg-accent-gold/5 prose-blockquote:text-gray-400
-                prose-hr:border-surface-border
-                text-xs
-              ">
-                <ReactMarkdown>{viewReport.content || viewReport.summary}</ReactMarkdown>
-              </div>
+              {(viewReport.content || '').includes('<div class="report"') || (viewReport.content || '').includes('<table') ? (
+                <div className="p-4 max-h-[500px] overflow-y-auto" dangerouslySetInnerHTML={{ __html: viewReport.content }} />
+              ) : (
+                <div className="report-container p-4 max-h-[500px] overflow-y-auto">
+                  <ReactMarkdown>{viewReport.content || viewReport.summary}</ReactMarkdown>
+                </div>
+              )}
             </div>
           )}
         </div>

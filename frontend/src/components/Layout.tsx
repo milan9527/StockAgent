@@ -3,7 +3,7 @@ import { useAuthStore } from '../store/authStore'
 import {
   LayoutDashboard, TrendingUp, Briefcase, Target,
   BarChart3, MessageSquare, Puzzle, LogOut, Bot,
-  FileSearch, Settings, Shield,
+  FileSearch, Settings, Shield, FolderOpen,
 } from 'lucide-react'
 
 const navItems = [
@@ -14,6 +14,7 @@ const navItems = [
   { to: '/strategy', icon: Target, label: '交易策略' },
   { to: '/quant', icon: BarChart3, label: '量化交易' },
   { to: '/chat', icon: MessageSquare, label: 'AI助手' },
+  { to: '/documents', icon: FolderOpen, label: '文档知识库' },
   { to: '/skills', icon: Puzzle, label: 'Skills' },
   { to: '/scanning', icon: Shield, label: '安全扫描' },
   { to: '/settings', icon: Settings, label: '设置' },

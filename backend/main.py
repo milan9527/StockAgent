@@ -17,6 +17,7 @@ from api.routes.settings_routes import router as settings_router
 from api.routes.analysis_routes import router as analysis_router
 from api.routes.watchlist_routes import router as watchlist_router
 from api.routes.scanning_routes import router as scanning_router
+from api.routes.document_routes import router as document_router
 from api.routes.watchlist_routes import router as watchlist_router
 
 settings = get_settings()
@@ -61,6 +62,7 @@ app.include_router(settings_router)
 app.include_router(analysis_router)
 app.include_router(watchlist_router)
 app.include_router(scanning_router)
+app.include_router(document_router)
 
 
 @app.get("/")
