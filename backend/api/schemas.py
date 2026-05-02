@@ -36,7 +36,8 @@ class UserResponse(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
-    agent_type: Optional[str] = "orchestrator"  # orchestrator, analyst, trader, quant
+    agent_type: Optional[str] = "orchestrator"
+    enabled_skills: Optional[list[str]] = None  # Registry skill names to enable
 
 class ChatResponse(BaseModel):
     response: str

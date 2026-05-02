@@ -81,7 +81,8 @@ class Settings(BaseSettings):
     SMTP_USER: str = Field(default="")
     SMTP_PASSWORD: str = Field(default="")
     NOTIFICATION_EMAIL_FROM: str = Field(default="")
-    NOTIFICATION_EMAIL_TO: str = Field(default="pingaws@amazon.com")
+    NOTIFICATION_EMAIL_TO: str = Field(default="")
+    SNS_TOPIC_ARN: str = Field(default="")
 
     # ── 腾讯证券API ──
     TENCENT_STOCK_API_BASE: str = Field(

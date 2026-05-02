@@ -413,3 +413,28 @@ class KnowledgeChunk(Base):
         Index("ix_knowledge_chunks_user", "user_id"),
         Index("ix_knowledge_chunks_document", "document_id"),
     )
+
+
+# ═══════════════════════════════════════════════════════
+# 定期任务
+# ═══════════════════════════════════════════════════════
+
+class ScheduledTask(Base):
+    __tablename__ = "scheduled_tasks"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, default="")  # Natural language description
+    prompt = Column(Text, nullable=False)  # Agent prompt to execute
+    cron_expression = Column(String(100), default="")  # EventBridge cron: cron(0 7 ? * MON-FRI *)
+    timezone = Column(String(50), default="Asia/Shanghai")
+    is_active = Column(Boolean, default=True)
+    agent_type = Column(String(50), default="orchestrator")
+    notification_email = Column(String(255), default="")  # Send result to email
+    aws_rule_name = Column(String(200), default="")  # EventBridge rule name
+    aws_rule_arn = Column(String(500), default="")
+    last_run_at = Column(DateTime, nullable=True)
+    last_result = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Bot, User, Sparkles, Zap, ToggleLeft, ToggleRight, ChevronRight, MessageSquarePlus, History, Clock, ChevronLeft, Trash2, Puzzle } from 'lucide-react'
+import { Send, Bot, User, Sparkles, Zap, ToggleLeft, ToggleRight, MessageSquarePlus, History, Clock, ChevronLeft, Trash2, Puzzle } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import api from '../services/api'
 
@@ -46,16 +46,18 @@ export default function ChatPage() {
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
   useEffect(() => {
-    api.get('/api/skills/builtin').then(r => {
-      const skills = r.data.skills || []
-      setAllSkills(skills)
-      setEnabledSkills(new Set(skills.map((s: any) => s.name.replace('技能', '-skill')
-        .replace('行情数据', 'market-data').replace('投资分析', 'analysis')
-        .replace('Web信息获取', 'web-fetch').replace('交易', 'trading')
-        .replace('量化交易', 'quant').replace('通知', 'notification')
-        .replace('专业财经爬虫', 'crawler').replace('浏览器爬虫', 'browser-crawler')
-        .replace('代码执行', 'code-interpreter')
-      )))
+    // Load skills from AgentCore Registry
+    api.get('/api/skills/registry').then(r => {
+      const records = (r.data.records || []).filter((s: any) => s.status === 'APPROVED')
+      setAllSkills(records.map((s: any) => ({
+        id: s.name,
+        name: s.display_name || s.name,
+        description: s.description,
+        tools: [],
+        registry_name: s.name,
+        skill_type: s.skill_type,
+      })))
+      setEnabledSkills(new Set(records.map((s: any) => s.name)))
     }).catch(() => {})
     refreshSessions()
   }, [refreshSessions])
@@ -129,7 +131,7 @@ export default function ChatPage() {
       const response = await fetch(`${baseUrl}/api/chat/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ message: currentInput, session_id: sessionId, agent_type: agentType }),
+        body: JSON.stringify({ message: currentInput, session_id: sessionId, agent_type: agentType, enabled_skills: Array.from(enabledSkills) }),
       })
 
       if (!response.ok) throw new Error(`Request failed with status ${response.status}`)
@@ -195,14 +197,8 @@ export default function ChatPage() {
   // Get contextual samples based on enabled skills
   const activeSamples = Array.from(enabledSkills).flatMap(sk => samplesByFocus[sk] || []).slice(0, 6)
 
-  // Map builtin skill names to registry-style names
-  const skillNameMap: Record<string, string> = {
-    '行情数据技能': 'market-data-skill', '投资分析技能': 'analysis-skill',
-    'Web信息获取技能': 'web-fetch-skill', '交易技能': 'trading-skill',
-    '量化交易技能': 'quant-skill', '通知技能': 'notification-skill',
-    '专业财经爬虫技能': 'crawler-skill', '浏览器爬虫技能': 'browser-crawler-skill',
-    '代码执行技能': 'code-interpreter-skill',
-  }
+  // Skills now come directly from Registry with registry_name as ID
+  const getSkillId = (skill: any) => skill.registry_name || skill.id || skill.name
 
   return (
     <div className="flex h-[calc(100vh-3rem)]">
@@ -426,7 +422,7 @@ export default function ChatPage() {
           </div>
           <p className="text-[10px] text-gray-500 mb-3">切换Skills控制Agent可用工具</p>
           <div className="flex gap-2">
-            <button onClick={() => setEnabledSkills(new Set(allSkills.map((s: any) => skillNameMap[s.name] || s.id)))}
+            <button onClick={() => setEnabledSkills(new Set(allSkills.map((s: any) => getSkillId(s))))}
               className="flex-1 text-[10px] py-1 rounded bg-primary-500/20 text-primary-300 hover:bg-primary-500/30">
               Enable All
             </button>
@@ -439,7 +435,7 @@ export default function ChatPage() {
 
         <div className="p-2 space-y-1">
           {allSkills.map((skill: any) => {
-            const regName = skillNameMap[skill.name] || skill.id
+            const regName = getSkillId(skill)
             const isEnabled = enabledSkills.has(regName)
             return (
               <div key={skill.id}

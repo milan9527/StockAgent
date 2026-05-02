@@ -141,6 +141,11 @@ async def chat_with_agent(
         f"{request.message}"
     )
 
+    # Add enabled skills filter
+    if request.enabled_skills and len(request.enabled_skills) < 20:
+        skills_str = ", ".join(request.enabled_skills)
+        context_prompt += f"\n\n[SKILL FILTER] 用户只启用了以下skills: {skills_str}。严格限制: 只使用这些skill对应的工具和子Agent。未列出的skill禁止调用。"
+
     # Save user message to DB
     user_msg = ChatMessage(
         user_id=current_user.id, session_id=session_id,

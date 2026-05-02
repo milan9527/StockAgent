@@ -11,23 +11,45 @@ from strands import tool
 
 @tool
 def run_backtest(
-    strategy_code: str,
-    strategy_params: dict,
-    kline_data: list[dict],
+    stock_code: str,
+    strategy_name: str = "dual_ma_cross",
+    strategy_params: dict = {},
     initial_capital: float = 1000000.0,
+    period_days: int = 120,
 ) -> dict:
-    """运行量化策略回测
+    """运行量化策略回测, 自动获取K线数据
 
     Args:
-        strategy_code: 策略代码(Python)
-        strategy_params: 策略参数
-        kline_data: K线历史数据
-        initial_capital: 初始资金
+        stock_code: 股票代码, 如 "600519"
+        strategy_name: 策略模板名称, 如 "dual_ma_cross", "macd_momentum", "bollinger_breakout", "rsi_overbought_oversold", "turtle_trading"
+        strategy_params: 策略参数(可选, 使用默认值)
+        initial_capital: 初始资金(默认100万)
+        period_days: 回测天数(默认120天)
     """
     import numpy as np
 
+    # Get K-line data internally
+    from agents.skills.market_data_skill import get_stock_kline
+    kline_result = get_stock_kline(stock_code, "day", period_days)
+    kline_data = kline_result.get("data", [])
+
     if not kline_data or len(kline_data) < 30:
-        return {"error": "历史数据不足，至少需要30根K线"}
+        return {"error": "历史数据不足, 至少需要30根K线"}
+
+    # Get strategy code from templates
+    templates = list_quant_templates()
+    template = None
+    for t in templates:
+        if t["template_name"] == strategy_name:
+            template = t
+            break
+
+    if not template or not template.get("code_template"):
+        return {"error": f"未找到策略模板: {strategy_name}"}
+
+    strategy_code = template["code_template"]
+    if not strategy_params:
+        strategy_params = template.get("default_params", {})
 
     try:
         # 构建回测环境
@@ -171,44 +193,153 @@ def list_quant_templates() -> list[dict]:
         {
             "name": "双均线交叉策略",
             "template_name": "dual_ma_cross",
-            "description": "经典双均线交叉策略，短期均线上穿长期均线买入，下穿卖出",
+            "description": "经典双均线交叉策略, 短期均线上穿长期均线买入, 下穿卖出",
             "category": "趋势跟踪",
             "difficulty": "入门",
+            "default_params": {"short_period": 5, "long_period": 20},
+            "code_template": """def initialize(context):
+    context.short = params.get('short_period', 5)
+    context.long = params.get('long_period', 20)
+
+def handle_data(context, data):
+    close = data['close']
+    ma_short = close.rolling(context.short).mean().iloc[-1]
+    ma_long = close.rolling(context.long).mean().iloc[-1]
+    prev_short = close.rolling(context.short).mean().iloc[-2]
+    prev_long = close.rolling(context.long).mean().iloc[-2]
+    if prev_short <= prev_long and ma_short > ma_long:
+        return {'signal': 'buy', 'weight': 0.3}
+    elif prev_short >= prev_long and ma_short < ma_long:
+        return {'signal': 'sell', 'weight': 1.0}
+    return {'signal': 'hold'}""",
         },
         {
             "name": "MACD动量策略",
             "template_name": "macd_momentum",
-            "description": "基于MACD指标的动量策略",
+            "description": "基于MACD指标的动量策略, DIF上穿DEA买入, 下穿卖出",
             "category": "动量",
             "difficulty": "入门",
+            "default_params": {"fast": 12, "slow": 26, "signal": 9},
+            "code_template": """def initialize(context):
+    context.fast = params.get('fast', 12)
+    context.slow = params.get('slow', 26)
+    context.sig = params.get('signal', 9)
+
+def handle_data(context, data):
+    close = data['close']
+    ema_fast = close.ewm(span=context.fast).mean()
+    ema_slow = close.ewm(span=context.slow).mean()
+    dif = ema_fast - ema_slow
+    dea = dif.ewm(span=context.sig).mean()
+    if dif.iloc[-1] > dea.iloc[-1] and dif.iloc[-2] <= dea.iloc[-2]:
+        return {'signal': 'buy', 'weight': 0.3}
+    elif dif.iloc[-1] < dea.iloc[-1] and dif.iloc[-2] >= dea.iloc[-2]:
+        return {'signal': 'sell', 'weight': 1.0}
+    return {'signal': 'hold'}""",
         },
         {
             "name": "布林带突破策略",
             "template_name": "bollinger_breakout",
-            "description": "基于布林带的均值回归策略",
+            "description": "价格触及布林下轨买入, 触及上轨卖出",
             "category": "均值回归",
             "difficulty": "中级",
+            "default_params": {"period": 20, "std_dev": 2},
+            "code_template": """def initialize(context):
+    context.period = params.get('period', 20)
+    context.std = params.get('std_dev', 2)
+
+def handle_data(context, data):
+    close = data['close']
+    ma = close.rolling(context.period).mean().iloc[-1]
+    std = close.rolling(context.period).std().iloc[-1]
+    upper = ma + context.std * std
+    lower = ma - context.std * std
+    price = close.iloc[-1]
+    if price <= lower:
+        return {'signal': 'buy', 'weight': 0.3}
+    elif price >= upper:
+        return {'signal': 'sell', 'weight': 1.0}
+    return {'signal': 'hold'}""",
         },
         {
             "name": "RSI超买超卖策略",
             "template_name": "rsi_overbought_oversold",
-            "description": "基于RSI指标的超买超卖策略",
+            "description": "RSI低于30买入, 高于70卖出",
             "category": "震荡",
             "difficulty": "入门",
+            "default_params": {"period": 14, "oversold": 30, "overbought": 70},
+            "code_template": """def initialize(context):
+    context.period = params.get('period', 14)
+    context.oversold = params.get('oversold', 30)
+    context.overbought = params.get('overbought', 70)
+
+def handle_data(context, data):
+    close = data['close']
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0).rolling(context.period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(context.period).mean()
+    rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else 100
+    rsi = 100 - (100 / (1 + rs))
+    if rsi < context.oversold:
+        return {'signal': 'buy', 'weight': 0.3}
+    elif rsi > context.overbought:
+        return {'signal': 'sell', 'weight': 1.0}
+    return {'signal': 'hold'}""",
         },
         {
             "name": "多因子选股策略",
             "template_name": "multi_factor",
-            "description": "参考幻方量化多因子模型，综合多维因子选股",
+            "description": "综合动量+均值回归+波动率因子",
             "category": "多因子",
             "difficulty": "高级",
+            "default_params": {"momentum_period": 20, "rsi_period": 14, "vol_period": 20},
+            "code_template": """def initialize(context):
+    context.mom = params.get('momentum_period', 20)
+    context.rsi_p = params.get('rsi_period', 14)
+
+def handle_data(context, data):
+    close = data['close']
+    # Momentum factor
+    mom = (close.iloc[-1] / close.iloc[-context.mom] - 1) * 100
+    # RSI factor
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0).rolling(context.rsi_p).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(context.rsi_p).mean()
+    rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else 100
+    rsi = 100 - (100 / (1 + rs))
+    # Combined score
+    score = 0
+    if mom > 5: score += 1
+    if rsi < 40: score += 1
+    if score >= 2:
+        return {'signal': 'buy', 'weight': 0.25}
+    elif rsi > 75 or mom < -10:
+        return {'signal': 'sell', 'weight': 1.0}
+    return {'signal': 'hold'}""",
         },
         {
             "name": "海龟交易策略",
             "template_name": "turtle_trading",
-            "description": "经典海龟交易法则，唐奇安通道突破+ATR仓位管理",
+            "description": "唐奇安通道突破+ATR仓位管理",
             "category": "趋势跟踪",
             "difficulty": "中级",
+            "default_params": {"entry_period": 20, "exit_period": 10},
+            "code_template": """def initialize(context):
+    context.entry = params.get('entry_period', 20)
+    context.exit = params.get('exit_period', 10)
+
+def handle_data(context, data):
+    high = data['high']
+    low = data['low']
+    close = data['close']
+    price = close.iloc[-1]
+    entry_high = high.rolling(context.entry).max().iloc[-2]
+    exit_low = low.rolling(context.exit).min().iloc[-2]
+    if price > entry_high:
+        return {'signal': 'buy', 'weight': 0.25}
+    elif price < exit_low:
+        return {'signal': 'sell', 'weight': 1.0}
+    return {'signal': 'hold'}""",
         },
     ]
     return templates

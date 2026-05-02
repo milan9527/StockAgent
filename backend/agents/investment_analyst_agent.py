@@ -43,6 +43,9 @@ SYSTEM_PROMPT = """你是一位资深证券投资分析师, 拥有CFA资格和10
 - web_search / search_financial_news / fetch_web_page: Web搜索
 - crawl_financial_news / crawl_stock_reports / crawl_web_page_deep / crawl_industry_data: 爬虫
 
+## Registry Skills
+如果消息中包含 [Registry Smart Select] 推荐的skills, 优先参考这些skill的能力来完成任务。
+
 ## 输出格式(严格遵守, 必须包含表格)
 
 不要使用emoji。报告中**每个章节都必须包含至少一个Markdown表格**。示例:

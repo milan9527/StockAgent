@@ -228,3 +228,98 @@ async def run_strategy_backtest(
     await db.commit()
 
     return backtest_result
+
+
+# ═══════════════════════════════════════════════════════
+# AI Agent 策略助手 (通过Runtime + Registry Smart Select)
+# ═══════════════════════════════════════════════════════
+
+from pydantic import BaseModel as _BaseModel
+
+
+class AgentStrategyRequest(_BaseModel):
+    prompt: str
+    module: str = "trading"  # trading or quant
+
+
+@router.post("/agent")
+async def agent_strategy(
+    request: AgentStrategyRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """AI策略助手 - 通过AgentCore Runtime + Registry Smart Select"""
+    import asyncio
+    import json as _json
+    import uuid
+    import traceback
+    from fastapi.responses import StreamingResponse
+    from config.settings import get_settings
+    from db.database import AsyncSessionLocal
+
+    _settings = get_settings()
+
+    # Registry Smart Select
+    registry_context = ""
+    registry_id = _settings.AGENTCORE_REGISTRY_ID
+    if registry_id:
+        try:
+            import boto3
+            client = boto3.client("bedrock-agentcore", region_name=_settings.AWS_REGION)
+            registry_arn = f"arn:aws:bedrock-agentcore:{_settings.AWS_REGION}:632930644527:registry/{registry_id}"
+            resp = client.search_registry_records(
+                registryIds=[registry_arn], searchQuery=request.prompt[:200], maxResults=5,
+            )
+            records = resp.get("registryRecords", [])
+            if records:
+                lines = ["\n[Registry Smart Select - 相关Skills:]"]
+                for rec in records:
+                    lines.append(f"- {rec.get('name', '')}: {rec.get('description', '')[:100]}")
+                registry_context = "\n".join(lines)
+        except Exception:
+            pass
+
+    # Build context
+    skill_hint = "trading-skill, market-data-skill, notification-skill" if request.module == "trading" else "quant-skill, market-data-skill, code-interpreter-skill"
+    context = (
+        f"[用户: {current_user.full_name or current_user.username}, "
+        f"风险偏好: {current_user.risk_preference}]\n"
+        f"[模块: {'交易策略' if request.module == 'trading' else '量化交易'}]\n"
+        f"[推荐Skills: {skill_hint}]\n\n"
+        f"{request.prompt}{registry_context}"
+    )
+
+    user_id = current_user.id
+
+    async def generate():
+        yield f"data: {_json.dumps({'type': 'ping', 'elapsed': 0})}\n\n"
+        loop = asyncio.get_event_loop()
+        from agents.runtime_client import invoke_runtime_agent
+        future = loop.run_in_executor(
+            None,
+            lambda: invoke_runtime_agent(
+                prompt=context,
+                session_id=f"{request.module}-{user_id}-{uuid.uuid4().hex[:8]}",
+                user_id=str(user_id),
+            )
+        )
+        elapsed = 0
+        while not future.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=10)
+                break
+            except asyncio.TimeoutError:
+                elapsed += 10
+                yield f"data: {_json.dumps({'type': 'ping', 'elapsed': elapsed})}\n\n"
+
+        try:
+            response_text = await future
+        except Exception as e:
+            response_text = f"Agent错误: {str(e)[:300]}"
+
+        result = _json.dumps({"type": "result", "response": response_text}, ensure_ascii=False)
+        yield f"data: {result}\n\n"
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )

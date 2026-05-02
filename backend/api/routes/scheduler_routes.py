@@ -1,0 +1,391 @@
+"""
+定期任务路由 - EventBridge + Lambda + AgentCore Runtime
+用自然语言定义定期任务, 自动解析为cron表达式
+"""
+from __future__ import annotations
+
+import uuid
+import json as _json
+import traceback
+from datetime import datetime
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
+from typing import Optional
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from db.database import get_db
+from db.models import User, ScheduledTask
+from api.auth import get_current_user
+from config.settings import get_settings
+
+router = APIRouter(prefix="/api/scheduler", tags=["定期任务"])
+_settings = get_settings()
+
+
+class TaskCreate(BaseModel):
+    description: str  # Natural language, e.g. "每个工作日15点分析A股市场"
+    prompt: str = ""  # Agent prompt (auto-generated if empty)
+    notification_email: str = ""
+    agent_type: str = "orchestrator"
+
+
+class TaskUpdate(BaseModel):
+    name: str = ""
+    description: str = ""
+    prompt: str = ""
+    cron_expression: str = ""
+    is_active: bool = True
+    notification_email: str = ""
+
+
+@router.get("/")
+async def list_tasks(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出所有定期任务"""
+    result = await db.execute(
+        select(ScheduledTask).where(ScheduledTask.user_id == current_user.id)
+        .order_by(ScheduledTask.created_at.desc())
+    )
+    tasks = result.scalars().all()
+    return {"tasks": [{
+        "id": str(t.id), "name": t.name, "description": t.description,
+        "prompt": t.prompt, "cron_expression": t.cron_expression,
+        "timezone": t.timezone, "is_active": t.is_active,
+        "agent_type": t.agent_type, "notification_email": t.notification_email,
+        "aws_rule_name": t.aws_rule_name,
+        "last_run_at": t.last_run_at.isoformat() if t.last_run_at else "",
+        "last_result": (t.last_result or "")[:200],
+        "created_at": t.created_at.isoformat() if t.created_at else "",
+    } for t in tasks]}
+
+
+@router.post("/")
+async def create_task(
+    request: TaskCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """用自然语言创建定期任务"""
+    # Use LLM to parse natural language into structured task
+    parsed = await _parse_task_description(request.description)
+
+    task = ScheduledTask(
+        user_id=current_user.id,
+        name=parsed.get("name", request.description[:50]),
+        description=request.description,
+        prompt=request.prompt or parsed.get("prompt", request.description),
+        cron_expression=parsed.get("cron", "cron(0 7 ? * MON-FRI *)"),
+        timezone="Asia/Shanghai",
+        agent_type=request.agent_type,
+        notification_email=request.notification_email or current_user.email or "",
+        is_active=True,
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+
+    # Create EventBridge rule
+    aws_result = await _create_eventbridge_rule(task)
+
+    if aws_result.get("rule_arn"):
+        task.aws_rule_name = aws_result["rule_name"]
+        task.aws_rule_arn = aws_result["rule_arn"]
+        await db.commit()
+
+    return {
+        "id": str(task.id), "name": task.name,
+        "cron_expression": task.cron_expression,
+        "parsed": parsed,
+        "aws": aws_result,
+    }
+
+
+@router.put("/{task_id}")
+async def update_task(
+    task_id: str, request: TaskUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """更新定期任务"""
+    result = await db.execute(
+        select(ScheduledTask).where(ScheduledTask.id == task_id, ScheduledTask.user_id == current_user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        return {"error": "任务不存在"}
+
+    if request.name: task.name = request.name
+    if request.description: task.description = request.description
+    if request.prompt: task.prompt = request.prompt
+    if request.cron_expression: task.cron_expression = request.cron_expression
+    task.is_active = request.is_active
+    if request.notification_email: task.notification_email = request.notification_email
+
+    # Update EventBridge rule
+    if task.aws_rule_name:
+        await _update_eventbridge_rule(task)
+
+    await db.commit()
+    return {"success": True, "id": str(task.id)}
+
+
+@router.delete("/{task_id}")
+async def delete_task(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除定期任务"""
+    result = await db.execute(
+        select(ScheduledTask).where(ScheduledTask.id == task_id, ScheduledTask.user_id == current_user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        return {"error": "任务不存在"}
+
+    # Delete EventBridge rule
+    if task.aws_rule_name:
+        await _delete_eventbridge_rule(task.aws_rule_name)
+
+    await db.delete(task)
+    await db.commit()
+    return {"success": True}
+
+
+@router.post("/{task_id}/run")
+async def run_task_now(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """立即执行一次任务 (SSE流式)"""
+    import asyncio
+    import json as _j
+    from fastapi.responses import StreamingResponse
+    from db.database import AsyncSessionLocal
+
+    result = await db.execute(
+        select(ScheduledTask).where(ScheduledTask.id == task_id, ScheduledTask.user_id == current_user.id)
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        return {"error": "任务不存在"}
+
+    task_prompt = task.prompt
+    task_db_id = task.id
+    task_name = task.name
+    task_email = task.notification_email
+    user_id = current_user.id
+
+    async def generate():
+        yield f"data: {_j.dumps({'type': 'ping', 'elapsed': 0})}\n\n"
+
+        loop = asyncio.get_event_loop()
+        from agents.runtime_client import invoke_runtime_agent
+        future = loop.run_in_executor(
+            None,
+            lambda: invoke_runtime_agent(
+                prompt=task_prompt,
+                session_id=f"scheduler-{task_db_id}-{uuid.uuid4().hex[:8]}",
+                user_id=str(user_id),
+            )
+        )
+
+        elapsed = 0
+        while not future.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=10)
+                break
+            except asyncio.TimeoutError:
+                elapsed += 10
+                yield f"data: {_j.dumps({'type': 'ping', 'elapsed': elapsed})}\n\n"
+
+        try:
+            response = await future
+        except Exception as e:
+            response = f"Error: {str(e)[:300]}"
+
+        # Save result to DB
+        try:
+            async with AsyncSessionLocal() as save_db:
+                from sqlalchemy import update
+                await save_db.execute(
+                    update(ScheduledTask).where(ScheduledTask.id == task_db_id).values(
+                        last_run_at=datetime.utcnow(), last_result=response[:2000]
+                    )
+                )
+                await save_db.commit()
+        except Exception:
+            pass
+
+        # Send notification via SNS
+        if task_email:
+            try:
+                await _send_task_notification(task_name, response, task_email)
+            except Exception as e:
+                print(f"[Scheduler] SNS notification failed: {e}")
+
+        yield f"data: {_j.dumps({'type': 'result', 'result': response[:3000]}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no", "Connection": "keep-alive",
+    })
+
+
+@router.post("/parse")
+async def parse_description(
+    description: str = "",
+    current_user: User = Depends(get_current_user),
+):
+    """预览: 解析自然语言为cron表达式"""
+    parsed = await _parse_task_description(description)
+    return parsed
+
+
+# ═══════════════════════════════════════════════════════
+# Internal helpers
+# ═══════════════════════════════════════════════════════
+
+async def _parse_task_description(description: str) -> dict:
+    """Use LLM to parse natural language into task name, cron, and prompt"""
+    try:
+        import boto3
+        client = boto3.client("bedrock-runtime", region_name=_settings.AWS_REGION)
+
+        prompt = f"""解析以下定期任务描述, 返回JSON格式:
+
+描述: {description}
+
+返回格式(只输出JSON, 不要其他内容):
+{{
+  "name": "任务名称(简短)",
+  "cron": "EventBridge cron表达式, 格式: cron(分 时 日 月 星期 年), 注意北京时间需要减8小时转UTC",
+  "prompt": "给AI Agent的完整提示词",
+  "schedule_desc": "人类可读的调度描述"
+}}
+
+常用cron示例:
+- 每个工作日北京时间15:00 = cron(0 7 ? * MON-FRI *)  (UTC 7:00)
+- 每天北京时间9:30 = cron(30 1 * * ? *)  (UTC 1:30)
+- 每周一北京时间8:00 = cron(0 0 ? * MON *)  (UTC 0:00)"""
+
+        body = _json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 1000,
+            "messages": [{"role": "user", "content": prompt}],
+        })
+        resp = client.invoke_model(modelId=_settings.LLM_MODEL_ID, body=body)
+        text = _json.loads(resp["body"].read()).get("content", [{}])[0].get("text", "")
+
+        # Extract JSON from response
+        import re
+        json_match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+        if json_match:
+            return _json.loads(json_match.group())
+    except Exception as e:
+        print(f"[Scheduler] Parse failed: {e}")
+
+    # Fallback
+    return {
+        "name": description[:50],
+        "cron": "cron(0 7 ? * MON-FRI *)",
+        "prompt": description,
+        "schedule_desc": "每个工作日 UTC 07:00 (北京时间 15:00)",
+    }
+
+
+async def _create_eventbridge_rule(task: ScheduledTask) -> dict:
+    """Create EventBridge rule + Lambda target"""
+    try:
+        import boto3
+        events = boto3.client("events", region_name=_settings.AWS_REGION)
+        rule_name = f"sec-trading-task-{str(task.id)[:8]}"
+
+        # Create rule
+        resp = events.put_rule(
+            Name=rule_name,
+            ScheduleExpression=task.cron_expression,
+            State="ENABLED" if task.is_active else "DISABLED",
+            Description=f"Securities Trading: {task.name}",
+        )
+        rule_arn = resp.get("RuleArn", "")
+
+        # Note: Lambda target needs to be configured separately
+        # For now, store the rule info
+        return {"rule_name": rule_name, "rule_arn": rule_arn, "status": "CREATED"}
+    except Exception as e:
+        print(f"[Scheduler] EventBridge create failed: {e}")
+        return {"error": str(e)[:200], "status": "FAILED"}
+
+
+async def _update_eventbridge_rule(task: ScheduledTask) -> dict:
+    """Update EventBridge rule"""
+    try:
+        import boto3
+        events = boto3.client("events", region_name=_settings.AWS_REGION)
+        events.put_rule(
+            Name=task.aws_rule_name,
+            ScheduleExpression=task.cron_expression,
+            State="ENABLED" if task.is_active else "DISABLED",
+            Description=f"Securities Trading: {task.name}",
+        )
+        return {"status": "UPDATED"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+async def _delete_eventbridge_rule(rule_name: str) -> dict:
+    """Delete EventBridge rule"""
+    try:
+        import boto3
+        events = boto3.client("events", region_name=_settings.AWS_REGION)
+        # Remove targets first
+        try:
+            events.remove_targets(Rule=rule_name, Ids=["agentcore-target"])
+        except Exception:
+            pass
+        events.delete_rule(Name=rule_name)
+        return {"status": "DELETED"}
+    except Exception as e:
+        return {"error": str(e)[:200]}
+
+
+async def _send_task_notification(task_name: str, result: str, email: str):
+    """Send task result via SNS"""
+    import boto3
+    sns = boto3.client("sns", region_name=_settings.AWS_REGION)
+
+    # Get or create topic
+    topic_arn = _settings.SNS_TOPIC_ARN
+    if not topic_arn:
+        resp = sns.create_topic(Name="securities-trading-notifications")
+        topic_arn = resp["TopicArn"]
+
+    # Truncate for SNS (max 256KB, but keep it reasonable for email)
+    # Strip HTML tags for email readability
+    import re
+    clean_result = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", result, flags=re.IGNORECASE)
+    clean_result = re.sub(r"<[^>]+>", "", clean_result)
+    clean_result = re.sub(r"\s+", " ", clean_result).strip()
+
+    message = f"""# 证券交易助手 - 定期任务报告
+
+**任务**: {task_name}
+**时间**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+
+---
+
+{clean_result[:8000]}
+
+---
+
+> 本邮件由AI自动生成, 仅供参考, 不构成投资建议。
+"""
+
+    sns.publish(
+        TopicArn=topic_arn,
+        Subject=f"[证券助手] {task_name}"[:100],
+        Message=message[:250000],  # SNS limit 256KB
+    )

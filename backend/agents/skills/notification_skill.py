@@ -57,25 +57,32 @@ def send_trading_signal_notification(
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-    # 邮件通知
+    # 邮件通知 - 使用AWS SNS
     if "email" in notification_channels and recipient_email:
         try:
-            if settings.SMTP_HOST:
-                msg = MIMEMultipart()
-                msg["From"] = settings.NOTIFICATION_EMAIL_FROM
-                msg["To"] = recipient_email
-                msg["Subject"] = subject
-                msg.attach(MIMEText(body, "plain", "utf-8"))
+            import boto3
+            sns = boto3.client("sns", region_name=settings.AWS_REGION)
+            # Publish to email via SNS (uses default topic or direct publish)
+            sns.publish(
+                TopicArn=settings.SNS_TOPIC_ARN if hasattr(settings, 'SNS_TOPIC_ARN') and settings.SNS_TOPIC_ARN else "",
+                Message=body,
+                Subject=subject[:100],
+            ) if hasattr(settings, 'SNS_TOPIC_ARN') and settings.SNS_TOPIC_ARN else None
 
-                with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-                    server.starttls()
-                    server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                    server.send_message(msg)
-                results["email"] = {"status": "sent", "to": recipient_email}
-            else:
-                results["email"] = {"status": "skipped", "reason": "SMTP未配置"}
+            # Direct email via SES as fallback
+            if not (hasattr(settings, 'SNS_TOPIC_ARN') and settings.SNS_TOPIC_ARN):
+                ses = boto3.client("ses", region_name=settings.AWS_REGION)
+                ses.send_email(
+                    Source=recipient_email,
+                    Destination={"ToAddresses": [recipient_email]},
+                    Message={
+                        "Subject": {"Data": subject, "Charset": "UTF-8"},
+                        "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
+                    },
+                )
+            results["email"] = {"status": "sent", "to": recipient_email}
         except Exception as e:
-            results["email"] = {"status": "failed", "error": str(e)}
+            results["email"] = {"status": "failed", "error": str(e)[:150]}
 
     # 推送通知(记录到Redis队列，前端WebSocket消费)
     if "push" in notification_channels:

@@ -17,19 +17,24 @@ export default function SettingsPage() {
   const [maxTokens, setMaxTokens] = useState(16384)
   const [sources, setSources] = useState<any[]>([])
   const [switching, setSwitching] = useState(false)
+  const [notifyEmail, setNotifyEmail] = useState('')
+  const [userEmail, setUserEmail] = useState('')
 
   useEffect(() => { loadSettings() }, [])
 
   const loadSettings = async () => {
     try {
-      const [modelsRes, sourcesRes] = await Promise.all([
+      const [modelsRes, sourcesRes, userRes] = await Promise.all([
         api.get('/api/settings/models'),
         api.get('/api/settings/data-sources'),
+        api.get('/api/auth/me'),
       ])
       setModels(modelsRes.data.models || [])
       setActiveModel(modelsRes.data.active || '')
       setMaxTokens(modelsRes.data.max_tokens || 16384)
       setSources(sourcesRes.data.sources || [])
+      setUserEmail(userRes.data.email || '')
+      setNotifyEmail(userRes.data.email || '')
     } catch {}
   }
 
@@ -148,6 +153,38 @@ export default function SettingsPage() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* 通知邮箱设置 */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+          <Settings className="w-5 h-5 text-accent-gold" />
+          通知邮箱
+        </h2>
+        <p className="text-xs text-gray-500 mb-4">定期任务执行结果、交易信号等通知将发送到此邮箱 (AWS SES)</p>
+        <div className="flex gap-3 items-end">
+          <div className="flex-1">
+            <label className="text-xs text-gray-400 mb-1 block">通知邮箱地址</label>
+            <input className="input-field" value={notifyEmail} onChange={e => setNotifyEmail(e.target.value)} placeholder="your@email.com" />
+          </div>
+          <button onClick={async () => {
+            try {
+              await api.put('/api/auth/profile', { email: notifyEmail })
+              toast.success('邮箱已更新')
+            } catch { toast.error('更新失败') }
+          }} className="btn-primary text-sm">保存</button>
+          <button onClick={async () => {
+            try {
+              toast.loading('发送测试邮件...')
+              const res = await api.post('/api/settings/test-email', { to_email: notifyEmail })
+              toast.dismiss()
+              if (res.data.status === 'sent') toast.success(res.data.message)
+              else if (res.data.status === 'verification_sent') toast.success(res.data.message, { duration: 8000 })
+              else toast.error(res.data.message)
+            } catch { toast.dismiss(); toast.error('发送失败') }
+          }} className="btn-secondary text-sm">测试邮件</button>
+        </div>
+        <p className="text-[10px] text-gray-600 mt-2">当前配置: AWS SES (us-east-1) → {notifyEmail || '未设置'}</p>
       </div>
 
       {/* 行情数据源 */}
