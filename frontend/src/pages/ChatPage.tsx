@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send, Bot, User, Sparkles, Zap, ToggleLeft, ToggleRight, ChevronRight, MessageSquarePlus, History, Clock, ChevronLeft, Trash2 } from 'lucide-react'
+import { Send, Bot, User, Sparkles, Zap, ToggleLeft, ToggleRight, ChevronRight, MessageSquarePlus, History, Clock, ChevronLeft, Trash2, Puzzle } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import api from '../services/api'
 
@@ -36,6 +36,7 @@ export default function ChatPage() {
   const [smartSelect, setSmartSelect] = useState(true)
   const [sessions, setSessions] = useState<any[]>([])
   const [showSessions, setShowSessions] = useState(true)
+  const [showSkills, setShowSkills] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   const refreshSessions = useCallback(() => {
@@ -309,6 +310,11 @@ export default function ChatPage() {
               <Zap className="w-3 h-3" /> Smart Select
               {smartSelect ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
             </button>
+            {/* Skill panel toggle */}
+            <button onClick={() => setShowSkills(!showSkills)}
+              className={`p-1.5 rounded-lg transition-colors ${showSkills ? 'bg-primary-500/20 text-primary-300' : 'text-gray-500 hover:text-gray-300'}`}>
+              <Puzzle className="w-4 h-4" />
+            </button>
           </div>
         </div>
 
@@ -408,8 +414,9 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {/* Right panel: Skill Control */}
-      <div className="w-72 border-l border-surface-border bg-surface-card overflow-y-auto">
+      {/* Right panel: Skill Control (collapsible) */}
+      <div className={`${showSkills ? 'w-72' : 'w-0'} transition-all duration-200 overflow-hidden border-l border-surface-border bg-surface-card`}>
+        <div className="w-72 overflow-y-auto h-full">
         <div className="p-4 border-b border-surface-border">
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-semibold text-white">Skill Control</h2>
@@ -457,6 +464,7 @@ export default function ChatPage() {
             )
           })}
         </div>
+      </div>
       </div>
     </div>
   )
