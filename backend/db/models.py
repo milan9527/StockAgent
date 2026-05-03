@@ -73,6 +73,7 @@ class User(Base):
     notification_email = Column(Boolean, default=True)
     notification_sms = Column(Boolean, default=False)
     notification_push = Column(Boolean, default=True)
+    notification_email_address = Column(String(255), default="")  # SNS notification target
     phone = Column(String(20), default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

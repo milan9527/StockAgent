@@ -27,6 +27,7 @@ class UserResponse(BaseModel):
     risk_preference: str
     notification_email: bool
     notification_push: bool
+    notification_email_address: str = ""
 
     class Config:
         from_attributes = True

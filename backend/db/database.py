@@ -51,3 +51,10 @@ async def init_db():
             ))
         except Exception:
             pass
+        # Add notification_email_address column if not exists
+        try:
+            await conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_email_address VARCHAR(255) DEFAULT ''"
+            ))
+        except Exception:
+            pass

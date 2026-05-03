@@ -62,25 +62,19 @@ def send_trading_signal_notification(
         try:
             import boto3
             sns = boto3.client("sns", region_name=settings.AWS_REGION)
-            # Publish to email via SNS (uses default topic or direct publish)
+
+            # Get or create SNS topic
+            topic_arn = getattr(settings, 'SNS_TOPIC_ARN', '') or ''
+            if not topic_arn:
+                resp = sns.create_topic(Name="securities-trading-notifications")
+                topic_arn = resp["TopicArn"]
+
             sns.publish(
-                TopicArn=settings.SNS_TOPIC_ARN if hasattr(settings, 'SNS_TOPIC_ARN') and settings.SNS_TOPIC_ARN else "",
+                TopicArn=topic_arn,
                 Message=body,
                 Subject=subject[:100],
-            ) if hasattr(settings, 'SNS_TOPIC_ARN') and settings.SNS_TOPIC_ARN else None
-
-            # Direct email via SES as fallback
-            if not (hasattr(settings, 'SNS_TOPIC_ARN') and settings.SNS_TOPIC_ARN):
-                ses = boto3.client("ses", region_name=settings.AWS_REGION)
-                ses.send_email(
-                    Source=recipient_email,
-                    Destination={"ToAddresses": [recipient_email]},
-                    Message={
-                        "Subject": {"Data": subject, "Charset": "UTF-8"},
-                        "Body": {"Text": {"Data": body, "Charset": "UTF-8"}},
-                    },
-                )
-            results["email"] = {"status": "sent", "to": recipient_email}
+            )
+            results["email"] = {"status": "sent", "to": recipient_email, "via": "SNS"}
         except Exception as e:
             results["email"] = {"status": "failed", "error": str(e)[:150]}
 

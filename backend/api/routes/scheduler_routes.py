@@ -353,7 +353,7 @@ async def _delete_eventbridge_rule(rule_name: str) -> dict:
 
 
 async def _send_task_notification(task_name: str, result: str, email: str):
-    """Send task result via SNS"""
+    """Send task result via SNS - auto-subscribe email if needed"""
     import boto3
     sns = boto3.client("sns", region_name=_settings.AWS_REGION)
 
@@ -363,17 +363,38 @@ async def _send_task_notification(task_name: str, result: str, email: str):
         resp = sns.create_topic(Name="securities-trading-notifications")
         topic_arn = resp["TopicArn"]
 
-    # Truncate for SNS (max 256KB, but keep it reasonable for email)
+    # Auto-subscribe email if not already subscribed
+    try:
+        subs = sns.list_subscriptions_by_topic(TopicArn=topic_arn)
+        already = any(
+            s["Endpoint"] == email and s["Protocol"] == "email"
+            and s["SubscriptionArn"] not in ("PendingConfirmation", "Deleted")
+            for s in subs.get("Subscriptions", [])
+        )
+        pending = any(
+            s["Endpoint"] == email and s["SubscriptionArn"] == "PendingConfirmation"
+            for s in subs.get("Subscriptions", [])
+        )
+        if not already and not pending:
+            sns.subscribe(TopicArn=topic_arn, Protocol="email", Endpoint=email)
+            print(f"[Scheduler] SNS subscription sent to {email} - needs confirmation")
+            return  # Can't send until confirmed
+        if pending:
+            print(f"[Scheduler] SNS subscription pending for {email}")
+            return
+    except Exception as e:
+        print(f"[Scheduler] SNS subscription check failed: {e}")
+
     # Strip HTML tags for email readability
     import re
     clean_result = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", result, flags=re.IGNORECASE)
     clean_result = re.sub(r"<[^>]+>", "", clean_result)
     clean_result = re.sub(r"\s+", " ", clean_result).strip()
 
-    message = f"""# 证券交易助手 - 定期任务报告
+    message = f"""证券交易助手 - 定期任务报告
 
-**任务**: {task_name}
-**时间**: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+任务: {task_name}
+时间: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
 
 ---
 
@@ -381,11 +402,11 @@ async def _send_task_notification(task_name: str, result: str, email: str):
 
 ---
 
-> 本邮件由AI自动生成, 仅供参考, 不构成投资建议。
+本邮件由AI自动生成, 仅供参考, 不构成投资建议。
 """
 
     sns.publish(
         TopicArn=topic_arn,
         Subject=f"[证券助手] {task_name}"[:100],
-        Message=message[:250000],  # SNS limit 256KB
+        Message=message[:250000],
     )

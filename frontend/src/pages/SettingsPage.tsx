@@ -34,7 +34,7 @@ export default function SettingsPage() {
       setMaxTokens(modelsRes.data.max_tokens || 16384)
       setSources(sourcesRes.data.sources || [])
       setUserEmail(userRes.data.email || '')
-      setNotifyEmail(userRes.data.email || '')
+      setNotifyEmail(userRes.data.notification_email_address || userRes.data.email || '')
     } catch {}
   }
 
@@ -161,7 +161,7 @@ export default function SettingsPage() {
           <Settings className="w-5 h-5 text-accent-gold" />
           通知邮箱
         </h2>
-        <p className="text-xs text-gray-500 mb-4">定期任务执行结果、交易信号等通知将发送到此邮箱 (AWS SES)</p>
+        <p className="text-xs text-gray-500 mb-4">定期任务执行结果、交易信号等通知将发送到此邮箱 (AWS SNS)</p>
         <div className="flex gap-3 items-end">
           <div className="flex-1">
             <label className="text-xs text-gray-400 mb-1 block">通知邮箱地址</label>
@@ -169,22 +169,24 @@ export default function SettingsPage() {
           </div>
           <button onClick={async () => {
             try {
-              await api.put('/api/auth/profile', { email: notifyEmail })
-              toast.success('邮箱已更新')
-            } catch { toast.error('更新失败') }
+              await api.put('/api/auth/profile', { notification_email_address: notifyEmail })
+              setUserEmail(notifyEmail)
+              toast.success('通知邮箱已更新')
+            } catch (err: any) { toast.error(err.response?.data?.detail || err.response?.data?.error || '更新失败') }
           }} className="btn-primary text-sm">保存</button>
           <button onClick={async () => {
             try {
-              toast.loading('发送测试邮件...')
+              toast.loading('发送测试通知...')
               const res = await api.post('/api/settings/test-email', { to_email: notifyEmail })
               toast.dismiss()
               if (res.data.status === 'sent') toast.success(res.data.message)
-              else if (res.data.status === 'verification_sent') toast.success(res.data.message, { duration: 8000 })
-              else toast.error(res.data.message)
-            } catch { toast.dismiss(); toast.error('发送失败') }
-          }} className="btn-secondary text-sm">测试邮件</button>
+              else if (res.data.status === 'subscription_sent') toast.success(res.data.message, { duration: 8000 })
+              else if (res.data.status === 'pending') toast.success(res.data.message, { duration: 6000 })
+              else toast.error(res.data.message || '发送失败')
+            } catch (err: any) { toast.dismiss(); toast.error(err.response?.data?.detail || '发送失败') }
+          }} className="btn-secondary text-sm">测试通知</button>
         </div>
-        <p className="text-[10px] text-gray-600 mt-2">当前配置: AWS SES (us-east-1) → {notifyEmail || '未设置'}</p>
+        <p className="text-[10px] text-gray-600 mt-2">当前配置: AWS SNS (us-east-1) → {notifyEmail || '未设置'}</p>
       </div>
 
       {/* 行情数据源 */}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Clock, Plus, Play, Trash2, Pause, CheckCircle, X, Sparkles } from 'lucide-react'
+import { Clock, Plus, Play, Trash2, Pause, CheckCircle, X, Sparkles, Edit3, Save, Mail } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import api from '../services/api'
 import toast from 'react-hot-toast'
@@ -20,6 +20,8 @@ export default function SchedulerPage() {
   const [email, setEmail] = useState('')
   const [creating, setCreating] = useState(false)
   const [runResult, setRunResult] = useState<any>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editForm, setEditForm] = useState({ name: '', description: '', prompt: '', cron_expression: '', notification_email: '' })
 
   useEffect(() => { loadTasks(); loadUserEmail() }, [])
 
@@ -28,7 +30,10 @@ export default function SchedulerPage() {
   }
 
   const loadUserEmail = async () => {
-    try { const r = await api.get('/api/auth/me'); setEmail(r.data.email || '') } catch {}
+    try {
+      const r = await api.get('/api/auth/me')
+      setEmail(r.data.notification_email_address || r.data.email || '')
+    } catch {}
   }
 
   const handleCreate = async () => {
@@ -54,6 +59,27 @@ export default function SchedulerPage() {
     } catch {}
   }
 
+  const startEdit = (t: any) => {
+    setEditingId(t.id)
+    setEditForm({
+      name: t.name || '',
+      description: t.description || '',
+      prompt: t.prompt || '',
+      cron_expression: t.cron_expression || '',
+      notification_email: t.notification_email || '',
+    })
+  }
+
+  const handleSaveEdit = async () => {
+    if (!editingId) return
+    try {
+      await api.put(`/api/scheduler/${editingId}`, editForm)
+      toast.success('任务已更新')
+      setEditingId(null)
+      loadTasks()
+    } catch { toast.error('更新失败') }
+  }
+
   const handleRunNow = async (id: string) => {
     setRunResult({ id, loading: true, result: '' })
     try {
@@ -63,15 +89,24 @@ export default function SchedulerPage() {
       })
       const contentType = resp.headers.get('content-type') || ''
       if (contentType.includes('text/event-stream')) {
-        const reader = resp.body?.getReader(); const decoder = new TextDecoder(); let buf = '', result: any = null
+        const reader = resp.body?.getReader(); const decoder = new TextDecoder(); let buf = '', result: any = null, streamText = ''
         if (reader) {
           while (true) {
             const { done, value } = await reader.read(); if (done) break
             buf += decoder.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() || ''
-            for (const l of lines) { if (l.startsWith('data: ')) { try { const p = JSON.parse(l.slice(6)); if (p.type === 'result') result = p } catch {} } }
+            for (const l of lines) {
+              if (l.startsWith('data: ')) {
+                try {
+                  const p = JSON.parse(l.slice(6))
+                  if (p.type === 'result') result = p
+                  else if (p.type === 'text') { streamText += p.content; setRunResult({ id, loading: true, result: streamText }) }
+                  else if (p.type === 'status') { setRunResult({ id, loading: true, result: streamText ? streamText + `\n\n_${p.content}_` : `_${p.content}_` }) }
+                } catch {}
+              }
+            }
           }
         }
-        setRunResult({ id, loading: false, result: result?.result || 'No response' })
+        setRunResult({ id, loading: false, result: result?.result || streamText || 'No response' })
       } else {
         const data = await resp.json()
         setRunResult({ id, loading: false, result: data.result || data.error || '' })
@@ -120,64 +155,127 @@ export default function SchedulerPage() {
       {/* 任务列表 */}
       <div className="space-y-4">
         {tasks.map(t => (
-          <div key={t.id} className="card">
-            <div className="flex items-start justify-between mb-2">
-              <div>
-                <h3 className="text-white font-semibold text-sm flex items-center gap-2">
-                  {t.is_active ? <CheckCircle className="w-4 h-4 text-green-400" /> : <Pause className="w-4 h-4 text-gray-500" />}
-                  {t.name}
-                </h3>
-                <p className="text-xs text-gray-500 mt-1">{t.description}</p>
+          <div key={t.id} className={`card ${!t.is_active ? 'opacity-60' : ''}`}>
+            {/* 编辑模式 */}
+            {editingId === t.id ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-accent-gold flex items-center gap-2">
+                    <Edit3 className="w-4 h-4" /> 编辑任务
+                  </h3>
+                  <button onClick={() => setEditingId(null)} className="text-gray-500 hover:text-white"><X className="w-4 h-4" /></button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[10px] text-gray-500 mb-1 block">任务名称</label>
+                    <input className="input-field text-sm" value={editForm.name}
+                      onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-gray-500 mb-1 block">Cron 表达式</label>
+                    <input className="input-field text-sm font-mono" value={editForm.cron_expression}
+                      onChange={e => setEditForm({ ...editForm, cron_expression: e.target.value })} />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] text-gray-500 mb-1 block">任务描述</label>
+                  <input className="input-field text-sm" value={editForm.description}
+                    onChange={e => setEditForm({ ...editForm, description: e.target.value })} />
+                </div>
+                <div>
+                  <label className="text-[10px] text-gray-500 mb-1 block">Agent 提示词</label>
+                  <textarea className="input-field text-sm h-24" value={editForm.prompt}
+                    onChange={e => setEditForm({ ...editForm, prompt: e.target.value })} />
+                </div>
+                <div>
+                  <label className="text-[10px] text-gray-500 mb-1 block flex items-center gap-1"><Mail className="w-3 h-3" /> 通知邮箱 (SNS)</label>
+                  <input className="input-field text-sm" value={editForm.notification_email}
+                    onChange={e => setEditForm({ ...editForm, notification_email: e.target.value })}
+                    placeholder="留空则不发送通知" />
+                </div>
+                <div className="flex gap-3">
+                  <button onClick={handleSaveEdit} className="btn-primary text-sm flex items-center gap-1">
+                    <Save className="w-3 h-3" /> 保存
+                  </button>
+                  <button onClick={() => setEditingId(null)} className="btn-secondary text-sm">取消</button>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${t.is_active ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-500'}`}>
-                  {t.cron_expression}
-                </span>
-              </div>
-            </div>
+            ) : (
+              /* 显示模式 */
+              <>
+                <div className="flex items-start justify-between mb-2">
+                  <div>
+                    <h3 className="text-white font-semibold text-sm flex items-center gap-2">
+                      {t.is_active ? <CheckCircle className="w-4 h-4 text-green-400" /> : <Pause className="w-4 h-4 text-gray-500" />}
+                      {t.name}
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-1">{t.description}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-mono ${t.is_active ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-500'}`}>
+                      {t.cron_expression}
+                    </span>
+                  </div>
+                </div>
 
-            <div className="grid grid-cols-3 gap-3 text-xs mb-3">
-              <div className="bg-surface-hover rounded p-2">
-                <p className="text-gray-600">Agent提示词</p>
-                <p className="text-gray-400 mt-1 line-clamp-2">{t.prompt?.slice(0, 100)}</p>
-              </div>
-              <div className="bg-surface-hover rounded p-2">
-                <p className="text-gray-600">上次执行</p>
-                <p className="text-gray-400 mt-1">{t.last_run_at ? new Date(t.last_run_at).toLocaleString('zh-CN') : '未执行'}</p>
-              </div>
-              <div className="bg-surface-hover rounded p-2">
-                <p className="text-gray-600">通知邮箱</p>
-                <p className="text-gray-400 mt-1">{t.notification_email || '未设置'}</p>
-              </div>
-            </div>
+                <div className="grid grid-cols-3 gap-3 text-xs mb-3">
+                  <div className="bg-surface-hover rounded p-2">
+                    <p className="text-gray-600">Agent提示词</p>
+                    <p className="text-gray-400 mt-1 line-clamp-2">{t.prompt?.slice(0, 100)}</p>
+                  </div>
+                  <div className="bg-surface-hover rounded p-2">
+                    <p className="text-gray-600">上次执行</p>
+                    <p className="text-gray-400 mt-1">{t.last_run_at ? new Date(t.last_run_at).toLocaleString('zh-CN') : '未执行'}</p>
+                  </div>
+                  <div className="bg-surface-hover rounded p-2">
+                    <p className="text-gray-600">通知邮箱</p>
+                    <p className="text-gray-400 mt-1">{t.notification_email || '未设置'}</p>
+                  </div>
+                </div>
 
-            {t.last_result && (
-              <div className="bg-surface-hover rounded p-2 mb-3 text-xs text-gray-400 max-h-20 overflow-hidden">
-                {t.last_result}
-              </div>
-            )}
-
-            <div className="flex gap-2 pt-2 border-t border-surface-border/30">
-              <button onClick={() => handleRunNow(t.id)} className="text-[10px] text-primary-400 hover:text-primary-300 flex items-center gap-1">
-                <Play className="w-3 h-3" /> 立即执行
-              </button>
-              <button onClick={() => handleToggle(t)} className="text-[10px] text-gray-400 hover:text-white flex items-center gap-1">
-                {t.is_active ? <><Pause className="w-3 h-3" /> 暂停</> : <><CheckCircle className="w-3 h-3" /> 启用</>}
-              </button>
-              <button onClick={() => handleDelete(t.id)} className="text-[10px] text-gray-500 hover:text-red-400 flex items-center gap-1 ml-auto">
-                <Trash2 className="w-3 h-3" /> 删除
-              </button>
-            </div>
-
-            {/* Run result */}
-            {runResult?.id === t.id && (
-              <div className="mt-3 p-3 bg-surface-hover rounded-lg border border-surface-border/50">
-                {runResult.loading ? (
-                  <p className="text-xs text-gray-500">执行中...</p>
-                ) : (
-                  <div className="report-container text-xs"><ReactMarkdown>{runResult.result}</ReactMarkdown></div>
+                {t.last_result && (
+                  <div className="bg-surface-hover rounded p-2 mb-3 text-xs text-gray-400 max-h-20 overflow-hidden">
+                    {t.last_result}
+                  </div>
                 )}
-              </div>
+
+                <div className="flex gap-2 pt-2 border-t border-surface-border/30">
+                  <button onClick={() => handleRunNow(t.id)} className="text-[10px] text-primary-400 hover:text-primary-300 flex items-center gap-1">
+                    <Play className="w-3 h-3" /> 立即执行
+                  </button>
+                  <button onClick={() => startEdit(t)} className="text-[10px] text-accent-gold hover:text-yellow-300 flex items-center gap-1">
+                    <Edit3 className="w-3 h-3" /> 编辑
+                  </button>
+                  <button onClick={() => handleToggle(t)} className="text-[10px] text-gray-400 hover:text-white flex items-center gap-1">
+                    {t.is_active ? <><Pause className="w-3 h-3" /> 暂停</> : <><CheckCircle className="w-3 h-3" /> 启用</>}
+                  </button>
+                  <button onClick={() => handleDelete(t.id)} className="text-[10px] text-gray-500 hover:text-red-400 flex items-center gap-1 ml-auto">
+                    <Trash2 className="w-3 h-3" /> 删除
+                  </button>
+                </div>
+
+                {/* Run result */}
+                {runResult?.id === t.id && (
+                  <div className="mt-3 p-3 bg-surface-hover rounded-lg border border-surface-border/50">
+                    {runResult.loading ? (
+                      runResult.result ? (
+                        <div className="report-container text-xs"><ReactMarkdown>{runResult.result}</ReactMarkdown></div>
+                      ) : (
+                        <p className="text-xs text-gray-500 flex items-center gap-2">
+                          <span className="inline-flex gap-1">
+                            <span className="w-1.5 h-1.5 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-1.5 h-1.5 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-1.5 h-1.5 bg-primary-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </span>
+                          Agent 执行中...
+                        </p>
+                      )
+                    ) : (
+                      <div className="report-container text-xs"><ReactMarkdown>{runResult.result}</ReactMarkdown></div>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </div>
         ))}
