@@ -1,0 +1,179 @@
+"""
+Backend Stack - ECR + ECS Fargate + ALB
+"""
+from aws_cdk import (
+    Stack, Duration, RemovalPolicy, CfnOutput,
+    aws_ec2 as ec2,
+    aws_ecs as ecs,
+    aws_ecr as ecr,
+    aws_iam as iam,
+    aws_logs as logs,
+    aws_elasticloadbalancingv2 as elbv2,
+    aws_rds as rds,
+    aws_elasticache as elasticache,
+    aws_cognito as cognito,
+    aws_sns as sns,
+)
+from constructs import Construct
+
+
+class BackendStack(Stack):
+    def __init__(self, scope: Construct, id: str, project: str,
+                 vpc: ec2.Vpc, ecs_sg: ec2.SecurityGroup, alb_sg: ec2.SecurityGroup,
+                 db_cluster: rds.DatabaseCluster,
+                 redis_cache: elasticache.CfnServerlessCache,
+                 user_pool: cognito.UserPool,
+                 user_pool_client: cognito.UserPoolClient,
+                 sns_topic: sns.Topic,
+                 **kwargs):
+        super().__init__(scope, id, **kwargs)
+
+        # ── ECR Repository ──
+        self.ecr_repo = ecr.Repository(self, "EcrRepo",
+            repository_name=f"{project}-backend",
+            removal_policy=RemovalPolicy.RETAIN,
+            lifecycle_rules=[ecr.LifecycleRule(max_image_count=10)],
+        )
+
+        # ── ECS Cluster ──
+        cluster = ecs.Cluster(self, "EcsCluster",
+            cluster_name=project,
+            vpc=vpc,
+            container_insights_v2=ecs.ContainerInsights.ENABLED,
+        )
+
+        # ── Task Role (permissions for the running container) ──
+        task_role = iam.Role(self, "TaskRole",
+            role_name=f"{project}-ecs-task-role",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+        )
+        # Bedrock (LLM + AgentCore)
+        task_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("AmazonBedrockFullAccess"))
+        # SES (HTML email notifications)
+        task_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSESFullAccess"))
+        # SNS (fallback notifications)
+        sns_topic.grant_publish(task_role)
+        # Cognito (user management)
+        task_role.add_to_policy(iam.PolicyStatement(
+            actions=["cognito-idp:*"],
+            resources=[user_pool.user_pool_arn],
+        ))
+        # Secrets Manager (Aurora credentials)
+        db_cluster.secret.grant_read(task_role)
+        # EventBridge (scheduler rules)
+        task_role.add_to_policy(iam.PolicyStatement(
+            actions=["events:PutRule", "events:DeleteRule", "events:PutTargets", "events:RemoveTargets"],
+            resources=["*"],
+        ))
+        # CloudWatch Logs
+        task_role.add_managed_policy(iam.ManagedPolicy.from_aws_managed_policy_name("CloudWatchLogsFullAccess"))
+
+        # ── Task Definition ──
+        task_def = ecs.FargateTaskDefinition(self, "TaskDef",
+            family=f"{project}-backend",
+            cpu=1024,       # 1 vCPU
+            memory_limit_mib=2048,  # 2 GB
+            runtime_platform=ecs.RuntimePlatform(
+                cpu_architecture=ecs.CpuArchitecture.ARM64,
+                operating_system_family=ecs.OperatingSystemFamily.LINUX,
+            ),
+            task_role=task_role,
+        )
+
+        # Log group
+        log_group = logs.LogGroup(self, "LogGroup",
+            log_group_name=f"/ecs/{project}-backend",
+            retention=logs.RetentionDays.TWO_WEEKS,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        # Container
+        container = task_def.add_container("Backend",
+            container_name="backend",
+            image=ecs.ContainerImage.from_ecr_repository(self.ecr_repo, tag="latest"),
+            logging=ecs.LogDrivers.aws_logs(stream_prefix="ecs", log_group=log_group),
+            environment={
+                "ENV": "aws",
+                "DEBUG": "false",
+                "AWS_REGION": self.region,
+                "HOST": "0.0.0.0",
+                "PORT": "8000",
+                "POSTGRES_HOST": db_cluster.cluster_endpoint.hostname,
+                "POSTGRES_PORT": str(db_cluster.cluster_endpoint.port),
+                "POSTGRES_DB": "securities_trading",
+                "REDIS_HOST": redis_cache.attr_endpoint_address if hasattr(redis_cache, 'attr_endpoint_address') else "",
+                "REDIS_PORT": "6379",
+                "COGNITO_USER_POOL_ID": user_pool.user_pool_id,
+                "COGNITO_CLIENT_ID": user_pool_client.user_pool_client_id,
+                "COGNITO_REGION": self.region,
+                "SNS_TOPIC_ARN": sns_topic.topic_arn,
+                "CORS_ORIGINS": '["*"]',
+                "LLM_MODEL_ID": "us.anthropic.claude-sonnet-4-6",
+                "LLM_MAX_TOKENS": "16384",
+                "LLM_TEMPERATURE": "0.3",
+            },
+            secrets={
+                "POSTGRES_USER": ecs.Secret.from_secrets_manager(db_cluster.secret, "username"),
+                "POSTGRES_PASSWORD": ecs.Secret.from_secrets_manager(db_cluster.secret, "password"),
+            },
+            health_check=ecs.HealthCheck(
+                command=["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+                interval=Duration.seconds(30),
+                timeout=Duration.seconds(5),
+                retries=3,
+                start_period=Duration.seconds(60),
+            ),
+        )
+        container.add_port_mappings(ecs.PortMapping(container_port=8000, protocol=ecs.Protocol.TCP))
+
+        # ── ALB ──
+        self.alb = elbv2.ApplicationLoadBalancer(self, "Alb",
+            load_balancer_name=f"{project}-alb",
+            vpc=vpc,
+            internet_facing=True,
+            security_group=alb_sg,
+        )
+
+        # ── ECS Service ──
+        service = ecs.FargateService(self, "Service",
+            service_name="backend",
+            cluster=cluster,
+            task_definition=task_def,
+            desired_count=2,
+            security_groups=[ecs_sg],
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS),
+            assign_public_ip=False,
+            health_check_grace_period=Duration.seconds(120),
+            min_healthy_percent=50,
+            max_healthy_percent=200,
+        )
+
+        # ALB Target Group + Listener
+        listener = self.alb.add_listener("HttpListener", port=80)
+        target_group = listener.add_targets("EcsTargets",
+            port=8000,
+            targets=[service],
+            health_check=elbv2.HealthCheck(
+                path="/health",
+                interval=Duration.seconds(30),
+                timeout=Duration.seconds(5),
+                healthy_threshold_count=2,
+                unhealthy_threshold_count=3,
+            ),
+            deregistration_delay=Duration.seconds(30),
+        )
+
+        # Auto-scaling
+        scaling = service.auto_scale_task_count(min_capacity=1, max_capacity=4)
+        scaling.scale_on_cpu_utilization("CpuScaling",
+            target_utilization_percent=70,
+            scale_in_cooldown=Duration.seconds(60),
+            scale_out_cooldown=Duration.seconds(60),
+        )
+
+        # Outputs
+        CfnOutput(self, "AlbDnsName", value=self.alb.load_balancer_dns_name)
+        CfnOutput(self, "AlbArn", value=self.alb.load_balancer_arn)
+        CfnOutput(self, "EcrRepoUri", value=self.ecr_repo.repository_uri)
+        CfnOutput(self, "EcsClusterName", value=cluster.cluster_name)
+        CfnOutput(self, "EcsServiceName", value=service.service_name)
