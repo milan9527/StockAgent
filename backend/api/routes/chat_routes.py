@@ -141,6 +141,14 @@ async def chat_with_agent(
         f"{request.message}"
     )
 
+    # Inject user's watchlist stocks
+    try:
+        from api.user_context import build_user_context
+        user_ctx = await build_user_context(current_user, db)
+        context_prompt = f"{user_ctx}\n\n{request.message}"
+    except Exception:
+        pass
+
     # Add enabled skills filter
     if request.enabled_skills and len(request.enabled_skills) < 20:
         skills_str = ", ".join(request.enabled_skills)

@@ -28,6 +28,12 @@ from agents.skills.market_data_skill import (
 
 ORCHESTRATOR_SYSTEM_PROMPT = """你是证券交易助手平台的总编排Agent。
 
+## 重要: 时效性要求
+- 你的训练数据有截止日期, 不要依赖训练数据中的市场信息
+- 所有市场分析、新闻搜索、行情数据必须通过工具获取实时/最新数据
+- 涉及"本周"、"今日"、"最新"等时间相关请求时, 必须调用web_search或get_stock_realtime_quote获取当前数据
+- 不要凭记忆回答任何市场相关问题, 必须先调用工具获取数据
+
 ## 你的直接工具
 - get_stock_realtime_quote: 获取股票实时行情
 - get_stock_batch_quotes: 批量获取行情

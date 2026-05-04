@@ -19,8 +19,13 @@ export default function SettingsPage() {
   const [switching, setSwitching] = useState(false)
   const [notifyEmail, setNotifyEmail] = useState('')
   const [userEmail, setUserEmail] = useState('')
+  const [sesStatus, setSesStatus] = useState<{ verified: boolean; status: string }>({ verified: false, status: '' })
 
   useEffect(() => { loadSettings() }, [])
+
+  const loadSesStatus = async () => {
+    try { const r = await api.get('/api/settings/ses-status'); setSesStatus(r.data) } catch {}
+  }
 
   const loadSettings = async () => {
     try {
@@ -35,6 +40,7 @@ export default function SettingsPage() {
       setSources(sourcesRes.data.sources || [])
       setUserEmail(userRes.data.email || '')
       setNotifyEmail(userRes.data.notification_email_address || userRes.data.email || '')
+      loadSesStatus()
     } catch {}
   }
 
@@ -159,9 +165,26 @@ export default function SettingsPage() {
       <div className="card">
         <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
           <Settings className="w-5 h-5 text-accent-gold" />
-          通知邮箱
+          通知邮箱 (SES)
         </h2>
-        <p className="text-xs text-gray-500 mb-4">定期任务执行结果、交易信号等通知将发送到此邮箱 (AWS SNS)</p>
+        <p className="text-xs text-gray-500 mb-3">定期任务执行结果将以HTML格式邮件发送到此邮箱。首次使用需要验证邮箱。</p>
+
+        {/* SES verification status */}
+        <div className={`flex items-center gap-2 px-3 py-2 rounded-lg mb-4 text-xs ${
+          sesStatus.verified
+            ? 'bg-green-900/20 border border-green-800/30 text-green-400'
+            : sesStatus.status === 'Pending'
+            ? 'bg-yellow-900/20 border border-yellow-800/30 text-yellow-400'
+            : 'bg-gray-800/50 border border-surface-border text-gray-500'
+        }`}>
+          <span className={`w-2 h-2 rounded-full ${sesStatus.verified ? 'bg-green-400' : sesStatus.status === 'Pending' ? 'bg-yellow-400 animate-pulse' : 'bg-gray-600'}`} />
+          {sesStatus.verified
+            ? `✅ ${notifyEmail} 已验证，可以接收HTML邮件`
+            : sesStatus.status === 'Pending'
+            ? `⏳ ${notifyEmail} 验证待确认，请查收邮件并点击确认链接`
+            : '未验证 — 请输入邮箱并点击"验证邮箱"'}
+        </div>
+
         <div className="flex gap-3 items-end">
           <div className="flex-1">
             <label className="text-xs text-gray-400 mb-1 block">通知邮箱地址</label>
@@ -172,21 +195,36 @@ export default function SettingsPage() {
               await api.put('/api/auth/profile', { notification_email_address: notifyEmail })
               setUserEmail(notifyEmail)
               toast.success('通知邮箱已更新')
+              loadSesStatus()
             } catch (err: any) { toast.error(err.response?.data?.detail || err.response?.data?.error || '更新失败') }
           }} className="btn-primary text-sm">保存</button>
           <button onClick={async () => {
+            if (!notifyEmail) { toast.error('请先输入邮箱'); return }
             try {
-              toast.loading('发送测试通知...')
+              toast.loading('处理中...')
               const res = await api.post('/api/settings/test-email', { to_email: notifyEmail })
               toast.dismiss()
-              if (res.data.status === 'sent') toast.success(res.data.message)
-              else if (res.data.status === 'subscription_sent') toast.success(res.data.message, { duration: 8000 })
-              else if (res.data.status === 'pending') toast.success(res.data.message, { duration: 6000 })
-              else toast.error(res.data.message || '发送失败')
-            } catch (err: any) { toast.dismiss(); toast.error(err.response?.data?.detail || '发送失败') }
-          }} className="btn-secondary text-sm">测试通知</button>
+              if (res.data.status === 'sent') {
+                toast.success(res.data.message)
+              } else if (res.data.status === 'verification_sent') {
+                toast.success(res.data.message, { duration: 10000 })
+                setSesStatus({ verified: false, status: 'Pending' })
+              } else if (res.data.status === 'pending') {
+                toast.success(res.data.message, { duration: 8000 })
+              } else {
+                toast.error(res.data.message || '操作失败')
+              }
+              loadSesStatus()
+            } catch (err: any) { toast.dismiss(); toast.error(err.response?.data?.detail || '操作失败') }
+          }} className={`text-sm ${sesStatus.verified ? 'btn-secondary' : 'bg-accent-gold/20 text-accent-gold border border-accent-gold/30 px-3 py-1.5 rounded-lg hover:bg-accent-gold/30'}`}>
+            {sesStatus.verified ? '发送测试邮件' : '验证邮箱'}
+          </button>
         </div>
-        <p className="text-[10px] text-gray-600 mt-2">当前配置: AWS SNS (us-east-1) → {notifyEmail || '未设置'}</p>
+
+        <div className="mt-3 text-[10px] text-gray-600 space-y-1">
+          <p>使用流程: ① 输入邮箱 → ② 点击"验证邮箱" → ③ 查收AWS验证邮件并点击确认 → ④ 发送测试邮件</p>
+          <p>当前配置: AWS SES (us-east-1) · {sesStatus.verified ? 'HTML邮件已就绪' : '待验证'}</p>
+        </div>
       </div>
 
       {/* 行情数据源 */}

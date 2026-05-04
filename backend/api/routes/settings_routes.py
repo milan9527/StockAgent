@@ -70,53 +70,109 @@ class TestEmailRequest(BaseModel):
 
 @router.post("/test-email")
 async def test_email(request: TestEmailRequest, current_user: User = Depends(get_current_user)):
-    """发送测试通知 - 使用SNS (自动创建Topic并订阅邮箱)"""
+    """发送测试邮件 - 使用SES (需要先验证邮箱)"""
+    try:
+        import boto3
+        from config.settings import get_settings
+        from datetime import datetime
+        _s = get_settings()
+
+        ses = boto3.client("ses", region_name=_s.AWS_REGION)
+
+        # Check if email is verified in SES
+        try:
+            resp = ses.get_identity_verification_attributes(Identities=[request.to_email])
+            attrs = resp.get("VerificationAttributes", {}).get(request.to_email, {})
+            status = attrs.get("VerificationStatus", "")
+        except Exception:
+            status = ""
+
+        if status != "Success":
+            # Need to verify email first
+            if status == "Pending":
+                return {
+                    "status": "pending",
+                    "message": f"验证邮件已发送到 {request.to_email}，请查收并点击确认链接，然后重试",
+                }
+            # Send verification email
+            ses.verify_email_identity(EmailAddress=request.to_email)
+            return {
+                "status": "verification_sent",
+                "message": f"SES验证邮件已发送到 {request.to_email}，请查收并点击确认链接。确认后即可接收HTML格式通知邮件。",
+            }
+
+        # Email is verified — send test HTML email
+        html_body = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;padding:20px;margin:0;">
+<div style="max-width:680px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+  <div style="background:linear-gradient(135deg,#1a2332,#2d3f52);padding:24px 32px;">
+    <h1 style="color:#d4a843;margin:0;font-size:20px;">证券交易助手</h1>
+    <p style="color:#9ca3af;margin:4px 0 0;font-size:13px;">邮件通知测试</p>
+  </div>
+  <div style="padding:24px 32px;">
+    <p style="color:#374151;font-size:14px;line-height:1.7;">
+      这是一封测试邮件，确认SES邮件通知服务正常工作。
+    </p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+      <tr><td style="padding:8px 12px;background:#f8f9fa;color:#6b7280;font-size:13px;width:80px;border-radius:6px 0 0 0;">用户</td>
+          <td style="padding:8px 12px;background:#f8f9fa;font-size:13px;font-weight:600;border-radius:0 6px 0 0;">{current_user.full_name or current_user.username}</td></tr>
+      <tr><td style="padding:8px 12px;background:#f8f9fa;color:#6b7280;font-size:13px;border-radius:0 0 0 6px;">时间</td>
+          <td style="padding:8px 12px;background:#f8f9fa;font-size:13px;border-radius:0 0 6px 0;">{datetime.now().strftime('%Y-%m-%d %H:%M')}</td></tr>
+    </table>
+    <p style="color:#059669;font-size:14px;font-weight:600;">✅ SES邮件服务配置成功！定期任务执行结果将以HTML格式发送到此邮箱。</p>
+  </div>
+  <div style="background:#f8f9fa;padding:16px 32px;border-top:1px solid #e5e7eb;">
+    <p style="color:#9ca3af;font-size:11px;margin:0;text-align:center;">
+      证券交易助手 Agent 平台 · Powered by AWS Bedrock AgentCore
+    </p>
+  </div>
+</div></body></html>"""
+
+        # Use verified email as sender, or the recipient as both sender and recipient
+        sender = request.to_email  # In sandbox, sender must also be verified
+        ses.send_email(
+            Source=sender,
+            Destination={"ToAddresses": [request.to_email]},
+            Message={
+                "Subject": {"Data": "证券交易助手 - 邮件通知测试", "Charset": "UTF-8"},
+                "Body": {
+                    "Html": {"Data": html_body, "Charset": "UTF-8"},
+                    "Text": {"Data": f"测试邮件 - 用户: {current_user.username}, 时间: {datetime.now().isoformat()}", "Charset": "UTF-8"},
+                },
+            },
+        )
+        return {"status": "sent", "message": f"HTML测试邮件已发送到 {request.to_email}"}
+
+    except Exception as e:
+        error_msg = str(e)
+        if "not verified" in error_msg.lower():
+            return {"status": "error", "message": f"邮箱 {request.to_email} 尚未通过SES验证，请先点击验证链接"}
+        return {"status": "error", "message": error_msg[:300]}
+
+
+@router.get("/ses-status")
+async def get_ses_status(current_user: User = Depends(get_current_user)):
+    """检查用户通知邮箱的SES验证状态"""
     try:
         import boto3
         from config.settings import get_settings
         _s = get_settings()
+        ses = boto3.client("ses", region_name=_s.AWS_REGION)
 
-        sns = boto3.client("sns", region_name=_s.AWS_REGION)
+        # Get user's notification email
+        email = current_user.notification_email_address or current_user.email or ""
+        if not email:
+            return {"email": "", "verified": False, "status": "no_email"}
 
-        # Get or create SNS topic
-        topic_arn = _s.SNS_TOPIC_ARN
-        if not topic_arn:
-            resp = sns.create_topic(Name="securities-trading-notifications")
-            topic_arn = resp["TopicArn"]
+        resp = ses.get_identity_verification_attributes(Identities=[email])
+        attrs = resp.get("VerificationAttributes", {}).get(email, {})
+        status = attrs.get("VerificationStatus", "NotStarted")
 
-        # Check if email is already subscribed
-        subs = sns.list_subscriptions_by_topic(TopicArn=topic_arn)
-        subscribed = any(
-            s["Endpoint"] == request.to_email and s["Protocol"] == "email" and s["SubscriptionArn"] != "PendingConfirmation"
-            for s in subs.get("Subscriptions", [])
-        )
-        pending = any(
-            s["Endpoint"] == request.to_email and s["SubscriptionArn"] == "PendingConfirmation"
-            for s in subs.get("Subscriptions", [])
-        )
-
-        if not subscribed and not pending:
-            # Subscribe email
-            sns.subscribe(TopicArn=topic_arn, Protocol="email", Endpoint=request.to_email)
-            return {
-                "status": "subscription_sent",
-                "message": f"订阅确认邮件已发送到 {request.to_email}, 请查收并点击确认链接, 然后重试发送测试",
-                "topic_arn": topic_arn,
-            }
-
-        if pending:
-            return {
-                "status": "pending",
-                "message": f"{request.to_email} 订阅待确认, 请查收邮件并点击确认链接",
-            }
-
-        # Send test notification
-        sns.publish(
-            TopicArn=topic_arn,
-            Subject="证券交易助手 - 通知测试",
-            Message=f"这是一封测试通知, 确认SNS邮件通知服务正常工作。\n\n用户: {current_user.username}\n时间: {__import__('datetime').datetime.now().isoformat()}",
-        )
-        return {"status": "sent", "message": f"测试通知已发送到 {request.to_email}", "topic_arn": topic_arn}
-
+        return {
+            "email": email,
+            "verified": status == "Success",
+            "status": status,
+        }
     except Exception as e:
-        return {"status": "error", "message": str(e)[:300]}
+        return {"email": "", "verified": False, "status": "error", "error": str(e)[:200]}

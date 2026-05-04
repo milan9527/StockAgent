@@ -201,10 +201,16 @@ async def agent_analysis(
             except Exception as e:
                 print(f"[Analysis Registry Search] {e}")
 
-        context = (
-            f"[用户: {current_user.full_name or current_user.username}, "
-            f"风险偏好: {current_user.risk_preference}]\n\n{prompt}{registry_context}"
-        )
+        # Build context with user's watchlist
+        try:
+            from api.user_context import build_user_context
+            user_ctx = await build_user_context(current_user, db)
+            context = f"{user_ctx}\n\n{prompt}{registry_context}"
+        except Exception:
+            context = (
+                f"[用户: {current_user.full_name or current_user.username}, "
+                f"风险偏好: {current_user.risk_preference}]\n\n{prompt}{registry_context}"
+            )
 
         # Save user_id for DB save in generator
         user_id = current_user.id

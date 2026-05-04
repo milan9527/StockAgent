@@ -177,19 +177,13 @@ async def run_strategy_backtest(
     if not strategy:
         raise HTTPException(status_code=404, detail="量化策略不存在")
 
-    # 获取K线数据
-    kline_result = get_stock_kline(request.stock_code, "day", 250)
-    if "error" in kline_result:
-        raise HTTPException(status_code=400, detail=kline_result["error"])
-
-    kline_data = kline_result.get("data", [])
-
-    # 运行回测
+    # 运行回测 — use strategy template_name to match the @tool function signature
     backtest_result = run_backtest(
-        strategy_code=strategy.code,
-        strategy_params=strategy.parameters,
-        kline_data=kline_data,
+        stock_code=request.stock_code,
+        strategy_name=strategy.template_name or "dual_ma_cross",
+        strategy_params=strategy.parameters or {},
         initial_capital=request.initial_capital,
+        period_days=250,
     )
 
     if "error" in backtest_result:
@@ -197,10 +191,11 @@ async def run_strategy_backtest(
 
     # 保存回测记录
     from datetime import datetime
+    trade_log = backtest_result.get("trade_log", [])
     backtest = Backtest(
         strategy_id=strategy.id,
-        start_date=datetime.strptime(kline_data[0]["date"], "%Y-%m-%d") if kline_data else datetime.now(),
-        end_date=datetime.strptime(kline_data[-1]["date"], "%Y-%m-%d") if kline_data else datetime.now(),
+        start_date=datetime.strptime(trade_log[0]["date"], "%Y-%m-%d") if trade_log else datetime.now(),
+        end_date=datetime.strptime(trade_log[-1]["date"], "%Y-%m-%d") if trade_log else datetime.now(),
         initial_capital=request.initial_capital,
         final_value=backtest_result.get("final_value", 0),
         total_return=backtest_result.get("total_return", 0),
@@ -246,6 +241,7 @@ class AgentStrategyRequest(_BaseModel):
 async def agent_strategy(
     request: AgentStrategyRequest,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """AI策略助手 - 通过AgentCore Runtime + Registry Smart Select"""
     import asyncio
@@ -278,15 +274,25 @@ async def agent_strategy(
         except Exception:
             pass
 
-    # Build context
+    # Build context with user's watchlist
     skill_hint = "trading-skill, market-data-skill, notification-skill" if request.module == "trading" else "quant-skill, market-data-skill, code-interpreter-skill"
-    context = (
-        f"[用户: {current_user.full_name or current_user.username}, "
-        f"风险偏好: {current_user.risk_preference}]\n"
-        f"[模块: {'交易策略' if request.module == 'trading' else '量化交易'}]\n"
-        f"[推荐Skills: {skill_hint}]\n\n"
-        f"{request.prompt}{registry_context}"
-    )
+    try:
+        from api.user_context import build_user_context
+        user_ctx = await build_user_context(current_user, db)
+        context = (
+            f"{user_ctx}\n"
+            f"[模块: {'交易策略' if request.module == 'trading' else '量化交易'}]\n"
+            f"[推荐Skills: {skill_hint}]\n\n"
+            f"{request.prompt}{registry_context}"
+        )
+    except Exception:
+        context = (
+            f"[用户: {current_user.full_name or current_user.username}, "
+            f"风险偏好: {current_user.risk_preference}]\n"
+            f"[模块: {'交易策略' if request.module == 'trading' else '量化交易'}]\n"
+            f"[推荐Skills: {skill_hint}]\n\n"
+            f"{request.prompt}{registry_context}"
+        )
 
     user_id = current_user.id
 
@@ -315,6 +321,26 @@ async def agent_strategy(
             response_text = await future
         except Exception as e:
             response_text = f"Agent错误: {str(e)[:300]}"
+
+        # Auto-save to documents
+        try:
+            from db.database import AsyncSessionLocal
+            from db.models import Document
+            async with AsyncSessionLocal() as save_db:
+                doc = Document(
+                    user_id=user_id,
+                    title=f"[{'交易策略' if request.module == 'trading' else '量化分析'}] {request.prompt[:60]}",
+                    category="strategy" if request.module == "trading" else "quant",
+                    content=response_text,
+                    file_type="md",
+                    file_size=len(response_text.encode("utf-8")),
+                    tags=[request.module],
+                    source="agent",
+                )
+                save_db.add(doc)
+                await save_db.commit()
+        except Exception:
+            pass
 
         result = _json.dumps({"type": "result", "response": response_text}, ensure_ascii=False)
         yield f"data: {result}\n\n"

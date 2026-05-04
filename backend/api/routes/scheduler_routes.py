@@ -179,6 +179,37 @@ async def run_task_now(
     task_email = task.notification_email
     user_id = current_user.id
 
+    # Inject user's watchlist stocks and current date into prompt for context
+    try:
+        from db.models import Watchlist, WatchlistItem
+        from datetime import datetime as _dt
+        wl_result = await db.execute(
+            select(Watchlist).where(Watchlist.user_id == current_user.id, Watchlist.is_default == True).limit(1)
+        )
+        default_wl = wl_result.scalar_one_or_none()
+        stock_list_str = ""
+        if default_wl:
+            items_result = await db.execute(
+                select(WatchlistItem).where(WatchlistItem.watchlist_id == default_wl.id)
+            )
+            items = items_result.scalars().all()
+            if items:
+                stock_list_str = ", ".join([f"{i.stock_name}({i.stock_code})" for i in items])
+
+        task_prompt = (
+            f"[当前日期: {_dt.now().strftime('%Y年%m月%d日 %H:%M')}]\n"
+            f"[用户: {current_user.full_name or current_user.username}, "
+            f"风险偏好: {current_user.risk_preference}]\n"
+        )
+        if stock_list_str:
+            task_prompt += f"[自选股池: {stock_list_str}]\n"
+        task_prompt += (
+            f"\n重要: 不要使用训练数据中的旧信息, 必须通过工具获取最新实时数据。\n\n"
+            f"{task.prompt}"
+        )
+    except Exception as e:
+        print(f"[Scheduler] Failed to inject watchlist: {e}")
+
     async def generate():
         yield f"data: {_j.dumps({'type': 'ping', 'elapsed': 0})}\n\n"
 
@@ -207,7 +238,7 @@ async def run_task_now(
         except Exception as e:
             response = f"Error: {str(e)[:300]}"
 
-        # Save result to DB
+        # Save result to DB + Document
         try:
             async with AsyncSessionLocal() as save_db:
                 from sqlalchemy import update
@@ -216,9 +247,22 @@ async def run_task_now(
                         last_run_at=datetime.utcnow(), last_result=response[:2000]
                     )
                 )
+                # Auto-save to documents
+                from db.models import Document
+                doc = Document(
+                    user_id=user_id,
+                    title=f"[定期任务] {task_name} - {datetime.utcnow().strftime('%Y-%m-%d')}",
+                    category="scheduler",
+                    content=response,
+                    file_type="md",
+                    file_size=len(response.encode("utf-8")),
+                    tags=["scheduler", task_name],
+                    source="scheduler",
+                )
+                save_db.add(doc)
                 await save_db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Scheduler] Save failed: {e}")
 
         # Send notification via SNS
         if task_email:
@@ -353,60 +397,172 @@ async def _delete_eventbridge_rule(rule_name: str) -> dict:
 
 
 async def _send_task_notification(task_name: str, result: str, email: str):
-    """Send task result via SNS - auto-subscribe email if needed"""
+    """Send task result via SES (HTML email) with SNS fallback.
+    The result from agent is typically Markdown — convert to styled HTML.
+    """
     import boto3
-    sns = boto3.client("sns", region_name=_settings.AWS_REGION)
-
-    # Get or create topic
-    topic_arn = _settings.SNS_TOPIC_ARN
-    if not topic_arn:
-        resp = sns.create_topic(Name="securities-trading-notifications")
-        topic_arn = resp["TopicArn"]
-
-    # Auto-subscribe email if not already subscribed
-    try:
-        subs = sns.list_subscriptions_by_topic(TopicArn=topic_arn)
-        already = any(
-            s["Endpoint"] == email and s["Protocol"] == "email"
-            and s["SubscriptionArn"] not in ("PendingConfirmation", "Deleted")
-            for s in subs.get("Subscriptions", [])
-        )
-        pending = any(
-            s["Endpoint"] == email and s["SubscriptionArn"] == "PendingConfirmation"
-            for s in subs.get("Subscriptions", [])
-        )
-        if not already and not pending:
-            sns.subscribe(TopicArn=topic_arn, Protocol="email", Endpoint=email)
-            print(f"[Scheduler] SNS subscription sent to {email} - needs confirmation")
-            return  # Can't send until confirmed
-        if pending:
-            print(f"[Scheduler] SNS subscription pending for {email}")
-            return
-    except Exception as e:
-        print(f"[Scheduler] SNS subscription check failed: {e}")
-
-    # Strip HTML tags for email readability
     import re
-    clean_result = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", result, flags=re.IGNORECASE)
-    clean_result = re.sub(r"<[^>]+>", "", clean_result)
-    clean_result = re.sub(r"\s+", " ", clean_result).strip()
 
-    message = f"""证券交易助手 - 定期任务报告
+    # Determine if result is already HTML or Markdown
+    is_html = bool(re.search(r'<(div|table|h[1-6]|p)\b', result, re.IGNORECASE))
 
-任务: {task_name}
-时间: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
+    if is_html:
+        # Already HTML (e.g. from analysis reports) — strip <style> but keep structure
+        html_body = re.sub(r"<style[^>]*>[\s\S]*?</style>", "", result, flags=re.IGNORECASE)
+    else:
+        # Markdown from agent — convert to HTML preserving structure
+        try:
+            import markdown as _md
+            html_body = _md.markdown(
+                result[:8000],
+                extensions=['tables', 'fenced_code', 'nl2br', 'sane_lists'],
+            )
+        except Exception:
+            # Fallback: preserve line breaks at minimum
+            escaped = result[:8000].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            html_body = f"<div style='white-space:pre-wrap;'>{escaped}</div>"
 
----
+    # Plain text version for email clients that don't support HTML
+    plain_text = re.sub(r"<[^>]+>", "", result)
+    plain_text = re.sub(r"\s+", " ", plain_text).strip()[:8000]
 
-{clean_result[:8000]}
-
----
-
-本邮件由AI自动生成, 仅供参考, 不构成投资建议。
-"""
-
-    sns.publish(
-        TopicArn=topic_arn,
-        Subject=f"[证券助手] {task_name}"[:100],
-        Message=message[:250000],
+    # Inline styles for email compatibility (email clients strip <style> tags)
+    styled_body = html_body
+    # Style tables
+    styled_body = re.sub(
+        r"<table(?![^>]*style)",
+        '<table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:13px"',
+        styled_body,
     )
+    styled_body = re.sub(
+        r"<th(?![^>]*style)",
+        '<th style="background:#f0f4f8;color:#1a2332;padding:10px 14px;border:1px solid #d1d5db;text-align:left;font-weight:600"',
+        styled_body,
+    )
+    styled_body = re.sub(
+        r"<td(?![^>]*style)",
+        '<td style="padding:10px 14px;border:1px solid #e5e7eb;color:#374151"',
+        styled_body,
+    )
+    # Style headings
+    styled_body = re.sub(
+        r"<h2(?![^>]*style)",
+        '<h2 style="color:#1a2332;font-size:18px;border-bottom:2px solid #d4a843;padding-bottom:8px;margin:24px 0 12px"',
+        styled_body,
+    )
+    styled_body = re.sub(
+        r"<h3(?![^>]*style)",
+        '<h3 style="color:#374151;font-size:15px;margin:20px 0 8px"',
+        styled_body,
+    )
+    styled_body = re.sub(
+        r"<h1(?![^>]*style)",
+        '<h1 style="color:#1a2332;font-size:20px;border-bottom:2px solid #d4a843;padding-bottom:8px;margin:24px 0 12px"',
+        styled_body,
+    )
+    # Style blockquotes
+    styled_body = re.sub(
+        r"<blockquote(?![^>]*style)",
+        '<blockquote style="border-left:3px solid #d4a843;padding:10px 16px;margin:16px 0;color:#6b7280;background:#fffbeb;border-radius:0 6px 6px 0"',
+        styled_body,
+    )
+    # Style paragraphs
+    styled_body = re.sub(
+        r"<p(?![^>]*style)",
+        '<p style="margin:10px 0;line-height:1.8"',
+        styled_body,
+    )
+    # Style lists
+    styled_body = re.sub(
+        r"<(ul|ol)(?![^>]*style)",
+        r'<\1 style="padding-left:24px;margin:10px 0"',
+        styled_body,
+    )
+    styled_body = re.sub(
+        r"<li(?![^>]*style)",
+        '<li style="margin:6px 0;line-height:1.7"',
+        styled_body,
+    )
+    # Style strong/bold
+    styled_body = re.sub(
+        r"<strong(?![^>]*style)",
+        '<strong style="color:#1a2332"',
+        styled_body,
+    )
+    # Style code
+    styled_body = re.sub(
+        r"<code(?![^>]*style)",
+        '<code style="background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:12px;font-family:monospace"',
+        styled_body,
+    )
+    # Style hr
+    styled_body = styled_body.replace("<hr>", '<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">')
+    styled_body = styled_body.replace("<hr/>", '<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">')
+    styled_body = styled_body.replace("<hr />", '<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">')
+
+    html_message = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;background:#f5f5f5;padding:20px;margin:0;color:#374151;">
+<div style="max-width:720px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+  <div style="background:linear-gradient(135deg,#1a2332,#2d3f52);padding:28px 32px;">
+    <h1 style="color:#d4a843;margin:0;font-size:22px;font-weight:700;">证券交易助手</h1>
+    <p style="color:#9ca3af;margin:6px 0 0;font-size:13px;">定期任务报告</p>
+  </div>
+  <div style="padding:28px 32px;">
+    <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
+      <tr>
+        <td style="padding:10px 14px;background:#f8f9fa;border-radius:8px 0 0 8px;color:#6b7280;font-size:13px;width:80px;font-weight:500;">任务</td>
+        <td style="padding:10px 14px;background:#f8f9fa;border-radius:0 8px 8px 0;font-size:14px;font-weight:600;color:#1a2332;">{task_name}</td>
+      </tr>
+      <tr><td colspan="2" style="height:6px;"></td></tr>
+      <tr>
+        <td style="padding:10px 14px;background:#f8f9fa;border-radius:8px 0 0 8px;color:#6b7280;font-size:13px;font-weight:500;">时间</td>
+        <td style="padding:10px 14px;background:#f8f9fa;border-radius:0 8px 8px 0;font-size:13px;color:#374151;">{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</td>
+      </tr>
+    </table>
+    <div style="border-top:1px solid #e5e7eb;padding-top:24px;font-size:14px;line-height:1.8;color:#374151;">
+      {styled_body}
+    </div>
+  </div>
+  <div style="background:#f8f9fa;padding:18px 32px;border-top:1px solid #e5e7eb;">
+    <p style="color:#9ca3af;font-size:11px;margin:0;text-align:center;line-height:1.6;">
+      本邮件由AI自动生成，仅供参考，不构成投资建议。<br>
+      证券交易助手 Agent 平台 · Powered by AWS Bedrock AgentCore
+    </p>
+  </div>
+</div>
+</body></html>"""
+
+    # Try SES first (supports HTML)
+    try:
+        ses = boto3.client("ses", region_name=_settings.AWS_REGION)
+        sender = email  # In sandbox, use verified recipient as sender
+        ses.send_email(
+            Source=sender,
+            Destination={"ToAddresses": [email]},
+            Message={
+                "Subject": {"Data": f"[证券助手] {task_name}"[:100], "Charset": "UTF-8"},
+                "Body": {
+                    "Html": {"Data": html_message, "Charset": "UTF-8"},
+                    "Text": {"Data": plain_text, "Charset": "UTF-8"},
+                },
+            },
+        )
+        print(f"[Scheduler] SES HTML email sent to {email}")
+        return
+    except Exception as e:
+        print(f"[Scheduler] SES failed ({e}), falling back to SNS")
+
+    # Fallback to SNS (plain text only)
+    try:
+        sns = boto3.client("sns", region_name=_settings.AWS_REGION)
+        topic_arn = _settings.SNS_TOPIC_ARN
+        if topic_arn:
+            sns.publish(
+                TopicArn=topic_arn,
+                Subject=f"[证券助手] {task_name}"[:100],
+                Message=plain_text[:250000],
+            )
+            print(f"[Scheduler] SNS fallback sent to topic")
+    except Exception as e:
+        print(f"[Scheduler] SNS also failed: {e}")
