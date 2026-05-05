@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { Send, Bot, User, Sparkles, Zap, ToggleLeft, ToggleRight, MessageSquarePlus, History, Clock, ChevronLeft, Trash2, Puzzle } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import api from '../services/api'
+import toast from 'react-hot-toast'
 
 interface Message { role: 'user' | 'assistant'; content: string; timestamp: string; smartSkills?: string[] }
 
@@ -361,6 +362,20 @@ export default function ChatPage() {
                 )}
                 <div className="flex items-center gap-2 mt-2">
                   <p className="text-[10px] text-gray-600">{new Date(msg.timestamp).toLocaleTimeString()}</p>
+                  {msg.role === 'assistant' && msg.content && msg.content.length > 100 && (
+                    <button onClick={async () => {
+                      try {
+                        await api.post('/api/documents/', {
+                          title: `AI对话: ${messages.find(m => m.role === 'user')?.content?.slice(0, 40) || '对话记录'}`,
+                          category: 'chat', content: msg.content,
+                          tags: ['chat', agentType], source: 'agent', add_to_kb: true,
+                        })
+                        toast.success('已保存到文档知识库')
+                      } catch { toast.error('保存失败') }
+                    }} className="text-[9px] px-1.5 py-0.5 bg-primary-500/20 text-primary-300 rounded hover:bg-primary-500/30">
+                      保存到知识库
+                    </button>
+                  )}
                   {msg.smartSkills && msg.smartSkills.length > 0 && (
                     <div className="flex gap-1">
                       {msg.smartSkills.map(s => (

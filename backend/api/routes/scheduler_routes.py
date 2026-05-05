@@ -49,15 +49,21 @@ async def list_tasks(
         .order_by(ScheduledTask.created_at.desc())
     )
     tasks = result.scalars().all()
+
+    # Get APScheduler job info
+    from services.task_scheduler import get_all_jobs
+    jobs = {j["id"]: j for j in get_all_jobs()}
+
     return {"tasks": [{
         "id": str(t.id), "name": t.name, "description": t.description,
         "prompt": t.prompt, "cron_expression": t.cron_expression,
         "timezone": t.timezone, "is_active": t.is_active,
         "agent_type": t.agent_type, "notification_email": t.notification_email,
-        "aws_rule_name": t.aws_rule_name,
         "last_run_at": t.last_run_at.isoformat() if t.last_run_at else "",
         "last_result": (t.last_result or "")[:200],
         "created_at": t.created_at.isoformat() if t.created_at else "",
+        "next_run_at": jobs.get(f"task-{t.id}", {}).get("next_run", ""),
+        "scheduler_active": f"task-{t.id}" in jobs,
     } for t in tasks]}
 
 
@@ -86,19 +92,14 @@ async def create_task(
     await db.commit()
     await db.refresh(task)
 
-    # Create EventBridge rule
-    aws_result = await _create_eventbridge_rule(task)
-
-    if aws_result.get("rule_arn"):
-        task.aws_rule_name = aws_result["rule_name"]
-        task.aws_rule_arn = aws_result["rule_arn"]
-        await db.commit()
+    # Sync with APScheduler
+    from services.task_scheduler import sync_task
+    sync_task(task)
 
     return {
         "id": str(task.id), "name": task.name,
         "cron_expression": task.cron_expression,
         "parsed": parsed,
-        "aws": aws_result,
     }
 
 
@@ -123,11 +124,12 @@ async def update_task(
     task.is_active = request.is_active
     if request.notification_email: task.notification_email = request.notification_email
 
-    # Update EventBridge rule
-    if task.aws_rule_name:
-        await _update_eventbridge_rule(task)
-
     await db.commit()
+
+    # Sync with APScheduler
+    from services.task_scheduler import sync_task
+    sync_task(task)
+
     return {"success": True, "id": str(task.id)}
 
 
@@ -145,9 +147,9 @@ async def delete_task(
     if not task:
         return {"error": "任务不存在"}
 
-    # Delete EventBridge rule
-    if task.aws_rule_name:
-        await _delete_eventbridge_rule(task.aws_rule_name)
+    # Remove from APScheduler
+    from services.task_scheduler import remove_task
+    remove_task(str(task.id))
 
     await db.delete(task)
     await db.commit()

@@ -218,10 +218,14 @@ export default function SchedulerPage() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-3 text-xs mb-3">
+                <div className="grid grid-cols-4 gap-3 text-xs mb-3">
                   <div className="bg-surface-hover rounded p-2">
                     <p className="text-gray-600">Agent提示词</p>
-                    <p className="text-gray-400 mt-1 line-clamp-2">{t.prompt?.slice(0, 100)}</p>
+                    <p className="text-gray-400 mt-1 line-clamp-2">{t.prompt?.slice(0, 80)}</p>
+                  </div>
+                  <div className="bg-surface-hover rounded p-2">
+                    <p className="text-gray-600">下次执行</p>
+                    <p className="text-gray-400 mt-1">{t.next_run_at ? new Date(t.next_run_at).toLocaleString('zh-CN') : (t.is_active ? '计算中...' : '已暂停')}</p>
                   </div>
                   <div className="bg-surface-hover rounded p-2">
                     <p className="text-gray-600">上次执行</p>

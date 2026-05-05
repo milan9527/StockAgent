@@ -28,11 +28,15 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     await init_db()
+    # Start APScheduler for periodic tasks
+    from services.task_scheduler import start_scheduler, stop_scheduler
+    await start_scheduler()
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动")
     print(f"   环境: {settings.ENV}")
     print(f"   区域: {settings.AWS_REGION}")
     print(f"   LLM: {settings.LLM_MODEL_ID}")
     yield
+    await stop_scheduler()
     print("👋 应用关闭")
 
 
