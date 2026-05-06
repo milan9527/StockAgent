@@ -65,11 +65,30 @@ export default function StrategyPage() {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ prompt: aiPrompt, module: 'trading' }),
       })
-      const reader = resp.body?.getReader(); const decoder = new TextDecoder(); let buf = '', result: any = null
-      if (reader) { while (true) { const { done, value } = await reader.read(); if (done) break; buf += decoder.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() || ''; for (const l of lines) { if (l.startsWith('data: ')) { try { const p = JSON.parse(l.slice(6)); if (p.type === 'result') result = p } catch {} } } } }
-      if (result) setAiResult(result.response); else throw new Error('No response')
-    } catch (e: any) { setAiResult(`Error: ${e.message}`) }
+      if (!resp.ok) throw new Error(`Request failed: ${resp.status}`)
+      const reader = resp.body?.getReader(); const decoder = new TextDecoder(); let buf = '', result: any = null, streamText = ''
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read(); if (done) break
+          buf += decoder.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() || ''
+          for (const l of lines) {
+            if (l.startsWith('data: ')) {
+              try {
+                const p = JSON.parse(l.slice(6))
+                if (p.type === 'result') result = p
+                else if (p.type === 'text') { streamText += p.content; setAiResult(streamText) }
+                else if (p.type === 'status') { setAiResult(streamText ? streamText + `\n\n_${p.content}_` : `_${p.content}_`) }
+              } catch {}
+            }
+          }
+        }
+      }
+      if (result?.response) setAiResult(result.response)
+      else if (!streamText) throw new Error('No response received')
+    } catch (e: any) { if (!aiResult) setAiResult(`Error: ${e.message}`) }
     setAiLoading(false)
+    // Auto-reload strategies in case AI created one
+    loadStrategies()
   }
 
   const handleApply = async () => {
@@ -82,10 +101,26 @@ export default function StrategyPage() {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ prompt, module: 'trading' }),
       })
-      const reader = resp.body?.getReader(); const decoder = new TextDecoder(); let buf = '', result: any = null
-      if (reader) { while (true) { const { done, value } = await reader.read(); if (done) break; buf += decoder.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() || ''; for (const l of lines) { if (l.startsWith('data: ')) { try { const p = JSON.parse(l.slice(6)); if (p.type === 'result') result = p } catch {} } } } }
-      if (result) setApplyResult(result.response)
-    } catch {}
+      if (!resp.ok) throw new Error(`Request failed: ${resp.status}`)
+      const reader = resp.body?.getReader(); const decoder = new TextDecoder(); let buf = '', result: any = null, streamText = ''
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read(); if (done) break
+          buf += decoder.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() || ''
+          for (const l of lines) {
+            if (l.startsWith('data: ')) {
+              try {
+                const p = JSON.parse(l.slice(6))
+                if (p.type === 'result') result = p
+                else if (p.type === 'text') { streamText += p.content; setApplyResult(streamText) }
+                else if (p.type === 'status') { setApplyResult(streamText ? streamText + `\n\n_${p.content}_` : `_${p.content}_`) }
+              } catch {}
+            }
+          }
+        }
+      }
+      if (result?.response) setApplyResult(result.response)
+    } catch (e: any) { setApplyResult(`Error: ${e.message}`) }
     setApplyLoading(false)
   }
 
@@ -141,7 +176,7 @@ export default function StrategyPage() {
                 <h3 className="text-white font-semibold text-sm">{s.name}</h3>
                 <p className="text-gray-500 text-xs">{s.description}</p>
               </div>
-              <span className={`text-[10px] px-1.5 py-0.5 rounded ${s.status === 'active' ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-400'}`}>{s.status === 'active' ? '运行中' : '草稿'}</span>
+              <span className={`text-[10px] px-1.5 py-0.5 rounded ${s.status === 'active' ? 'bg-green-900/30 text-green-400' : 'bg-gray-800 text-gray-400'}`}>{s.status === 'active' ? '已启用' : '未启用'}</span>
             </div>
             <div className="flex gap-1 flex-wrap mb-2">
               {(s.indicators || []).map((ind: string) => <span key={ind} className="text-[9px] px-1.5 py-0.5 bg-surface-hover rounded text-accent-gold">{ind}</span>)}
@@ -170,6 +205,10 @@ export default function StrategyPage() {
             <h2 className="text-sm font-semibold text-white">应用策略: {applyStrategy.name}</h2>
             <button onClick={() => setApplyStrategy(null)} className="text-gray-500 hover:text-white"><X className="w-4 h-4" /></button>
           </div>
+          <p className="text-xs text-gray-500">
+            买入: <span className="text-accent-red">{(applyStrategy.buy_conditions||[]).join(' | ')}</span>
+            <br/>卖出: <span className="text-accent-green">{(applyStrategy.sell_conditions||[]).join(' | ')}</span>
+          </p>
           <div className="flex gap-3 items-end">
             <div className="flex-1">
               <label className="text-xs text-gray-500 mb-1 block">选择股票</label>
@@ -178,6 +217,25 @@ export default function StrategyPage() {
             {applyStock.code && <span className="text-xs text-gray-400 pb-2">{applyStock.name}({applyStock.code})</span>}
             <button onClick={handleApply} disabled={!applyStock.code || applyLoading} className="btn-primary text-sm disabled:opacity-50">
               {applyLoading ? '分析中...' : '分析买卖点'}
+            </button>
+            <button onClick={async () => {
+              setApplyLoading(true); setApplyResult('')
+              try {
+                const token = (() => { try { return JSON.parse(localStorage.getItem('auth-storage') || '{}').state?.token || '' } catch { return '' } })()
+                const prompt = `应用交易策略"${applyStrategy.name}"到我的自选股池中所有股票。策略条件: 买入[${(applyStrategy.buy_conditions||[]).join(',')}] 卖出[${(applyStrategy.sell_conditions||[]).join(',')}]。请逐一分析每只自选股当前是否满足买卖条件, 用表格列出每只股票的信号(买入/卖出/持有)和理由。`
+                const resp = await fetch(`${import.meta.env.VITE_API_URL || ''}/api/strategy/agent`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                  body: JSON.stringify({ prompt, module: 'trading' }),
+                })
+                if (!resp.ok) throw new Error(`Request failed: ${resp.status}`)
+                const reader = resp.body?.getReader(); const decoder = new TextDecoder(); let buf = '', result: any = null, streamText = ''
+                setApplyResult('⏳ 正在分析自选股...')
+                if (reader) { while (true) { const { done, value } = await reader.read(); if (done) break; buf += decoder.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() || ''; for (const l of lines) { if (l.startsWith('data: ')) { try { const p = JSON.parse(l.slice(6)); if (p.type === 'result') result = p; else if (p.type === 'text') { streamText += p.content; setApplyResult(streamText) } else if (p.type === 'status') { setApplyResult(streamText ? streamText + `\n\n_${p.content}_` : `_${p.content}_`) } } catch {} } } } }
+                if (result) setApplyResult(result.response)
+              } catch (e: any) { setApplyResult(`Error: ${e.message}`) }
+              setApplyLoading(false)
+            }} disabled={applyLoading} className="btn-secondary text-sm disabled:opacity-50 whitespace-nowrap">
+              {applyLoading ? '分析中...' : '应用到自选股'}
             </button>
           </div>
           {applyResult && <div className="report-container p-4 bg-surface-hover rounded-lg"><ReactMarkdown>{applyResult}</ReactMarkdown></div>}
@@ -193,11 +251,40 @@ export default function StrategyPage() {
           <button onClick={handleAi} disabled={aiLoading || !aiPrompt} className="btn-primary flex items-center gap-2 disabled:opacity-50"><Send className="w-4 h-4" /></button>
         </div>
         <div className="flex gap-2 mt-2 flex-wrap">
-          {['制定一个基于MACD和RSI的稳健策略', '搜索A股中满足均线多头排列的股票', '优化止损规则降低回撤', '推荐适合当前市场的策略'].map(s => (
+          {['创建基于MACD和KDJ金叉的中线策略', '用我的策略分析自选股的买卖信号', '搜索A股中满足均线多头排列的股票', '模拟买入贵州茅台1000股'].map(s => (
             <button key={s} onClick={() => setAiPrompt(s)} className="text-[10px] px-2 py-1 bg-surface-hover rounded text-gray-500 hover:text-white">{s}</button>
           ))}
         </div>
-        {aiResult && <div className="mt-3 report-container p-4 bg-surface-hover rounded-lg border border-surface-border/50"><ReactMarkdown>{aiResult}</ReactMarkdown></div>}
+        {aiResult && (
+          <div className="mt-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] text-gray-500">AI策略助手结果</span>
+              <div className="flex gap-2">
+                <button onClick={() => {
+                  // Pre-fill the strategy form with AI suggestion
+                  setForm({ ...form, name: aiPrompt.slice(0, 30), description: aiPrompt })
+                  setShowForm(true); setEditId('')
+                  toast.success('请在上方表单中完善策略详情并保存')
+                }} className="text-[10px] px-2 py-1 bg-accent-gold/20 text-accent-gold rounded hover:bg-accent-gold/30">
+                  保存为策略
+                </button>
+                <button onClick={async () => {
+                  try {
+                    await api.post('/api/documents/', {
+                      title: `AI策略: ${aiPrompt.slice(0, 40)}`,
+                      category: 'strategy', content: aiResult,
+                      tags: ['strategy', 'ai'], source: 'agent', add_to_kb: true,
+                    })
+                    toast.success('已保存到文档知识库')
+                  } catch { toast.error('保存失败') }
+                }} className="text-[10px] px-2 py-1 bg-primary-500/20 text-primary-300 rounded hover:bg-primary-500/30">
+                  保存到知识库
+                </button>
+              </div>
+            </div>
+            <div className="report-container p-4 bg-surface-hover rounded-lg border border-surface-border/50"><ReactMarkdown>{aiResult}</ReactMarkdown></div>
+          </div>
+        )}
       </div>
     </div>
   )

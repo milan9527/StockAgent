@@ -18,7 +18,7 @@ const samplesByFocus: Record<string, string[]> = {
   'market-data-skill': ['查询贵州茅台实时行情', '批量查询宁德时代、比亚迪行情'],
   'analysis-skill': ['分析贵州茅台的技术指标', '评估宁德时代的投资价值'],
   'web-fetch-skill': ['搜索今日A股市场最新动态', '查找新能源行业最新政策'],
-  'trading-skill': ['检查股票池的买卖信号', '制定一个稳健的交易策略'],
+  'trading-skill': ['用MACD+KDJ策略分析自选股买卖信号', '模拟买入比亚迪1000股', '创建均线底部聚集交易策略'],
   'quant-skill': ['用双均线策略回测贵州茅台', '列出所有量化策略模板'],
   'crawler-skill': ['爬取东方财富固态电池新闻', '获取中际旭创券商研报'],
   'notification-skill': ['生成今日投资报告'],

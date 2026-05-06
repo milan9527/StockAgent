@@ -272,22 +272,22 @@ async def _seed_new_user_data(user, db):
         SEED_TASKS = [
             {"name": "每日走势预测", "description": "每个工作日14:30, 预测自选股和大盘明日走势",
              "prompt": "分析自选股池中所有股票和大盘的当前走势, 结合技术指标、资金流向和市场情绪, 预测明日走势方向和可能的涨跌幅区间。请在回复末尾添加 [预测记录] 标签。",
-             "cron_expression": "cron(30 6 ? * MON-FRI *)"},
+             "cron_expression": "cron(30 14 ? * MON-FRI *)"},
             {"name": "每周预测验证与自我改进", "description": "每周一9:00, 验证上周预测结果, 分析预测准确率, 自我改进",
              "prompt": "回顾上周的所有预测记录, 对比实际走势验证预测准确率。分析成功和失败原因, 总结经验教训, 提出改进方向。",
-             "cron_expression": "cron(0 1 ? * MON *)"},
+             "cron_expression": "cron(0 9 ? * MON *)"},
             {"name": "每日A股市场分析", "description": "每个工作日北京时间15点, 全面分析A股市场",
              "prompt": "全面分析今日A股市场走势, 包括指数表现、热点板块和资金流向, 结合技术指标分析趋势, 给出操作建议。",
-             "cron_expression": "cron(0 7 ? * MON-FRI *)"},
+             "cron_expression": "cron(0 15 ? * MON-FRI *)"},
             {"name": "每周买卖信号检查", "description": "每周一早上9点, 检查自选股池中所有股票的买卖信号",
              "prompt": "检查自选股池中所有股票的技术指标和买卖信号, 标记达到买入或卖出条件的股票, 生成信号报告。",
-             "cron_expression": "cron(0 1 ? * MON *)"},
+             "cron_expression": "cron(0 9 ? * MON *)"},
             {"name": "每日收盘绩效报告", "description": "每天收盘后16点, 生成今日投资组合绩效报告",
              "prompt": "生成今日投资组合绩效报告, 包括持仓盈亏、收益率, 分析表现最好和最差的持仓, 给出调仓建议。",
-             "cron_expression": "cron(0 8 ? * MON-FRI *)"},
+             "cron_expression": "cron(0 16 ? * MON-FRI *)"},
             {"name": "每周市场周报", "description": "每周五下午3点, 搜索本周A股市场重大新闻和政策变化, 生成周报",
              "prompt": "搜索本周A股市场重大新闻和政策变化, 分析对市场的影响, 总结本周市场表现, 展望下周走势。",
-             "cron_expression": "cron(0 7 ? * FRI *)"},
+             "cron_expression": "cron(0 15 ? * FRI *)"},
         ]
         for st in SEED_TASKS:
             db.add(ScheduledTask(
@@ -310,8 +310,9 @@ async def _seed_new_user_data(user, db):
 async def _ensure_user_has_seed_data(user, db):
     """Check if existing user has seed data, create if missing.
     This handles users created before the seed code was deployed.
+    Always checks each category independently and fills missing ones.
     """
-    from db.models import Watchlist, ScheduledTask, Portfolio, QuantStrategy
+    from db.models import Watchlist, ScheduledTask, Portfolio, QuantStrategy, TradingStrategy
 
     try:
         result = await db.execute(select(Watchlist).where(Watchlist.user_id == user.id).limit(1))
@@ -326,15 +327,27 @@ async def _ensure_user_has_seed_data(user, db):
         result = await db.execute(select(QuantStrategy).where(QuantStrategy.user_id == user.id).limit(1))
         has_quant = result.scalar_one_or_none() is not None
 
-        if not has_watchlist or not has_tasks or not has_portfolio or not has_quant:
-            print(f"[Auth] User {user.username} missing seed data (wl={has_watchlist} tasks={has_tasks} port={has_portfolio} quant={has_quant}), seeding...")
-            if not has_watchlist and not has_portfolio and not has_quant:
-                # Full seed
-                await _seed_new_user_data(user, db)
-            else:
-                # Partial seed — only add missing quant strategies
-                if not has_quant:
-                    await _seed_quant_strategies(user, db)
+        result = await db.execute(select(TradingStrategy).where(TradingStrategy.user_id == user.id).limit(1))
+        has_trading = result.scalar_one_or_none() is not None
+
+        if has_watchlist and has_tasks and has_portfolio and has_quant and has_trading:
+            return  # All good
+
+        print(f"[Auth] User {user.username} missing data (wl={has_watchlist} tasks={has_tasks} port={has_portfolio} quant={has_quant} trading={has_trading}), seeding...")
+
+        if not has_watchlist and not has_portfolio and not has_quant and not has_trading:
+            # Full seed (new user)
+            await _seed_new_user_data(user, db)
+        else:
+            # Partial seed — fill missing pieces
+            if not has_quant or not has_trading:
+                await _seed_quant_strategies(user, db)
+            if not has_watchlist:
+                await _seed_watchlist(user, db)
+            if not has_portfolio:
+                await _seed_portfolio(user, db)
+            if not has_tasks:
+                await _seed_scheduler_tasks(user, db)
     except Exception as e:
         print(f"[Auth] Error checking seed data for {user.username}: {e}")
 
@@ -392,3 +405,50 @@ async def _seed_quant_strategies(user, db):
             await db.rollback()
         except Exception:
             pass
+
+
+async def _seed_watchlist(user, db):
+    """Seed only watchlist for existing user"""
+    from db.models import Watchlist, WatchlistItem
+    try:
+        watchlist = Watchlist(user_id=user.id, name="核心股票池", description="投资分析Agent推荐的核心股票池", is_default=True)
+        db.add(watchlist)
+        await db.flush()
+        for code, name, reason in [("600519", "贵州茅台", "白酒龙头"), ("300750", "宁德时代", "动力电池龙头"), ("000858", "五粮液", "高端白酒"), ("601318", "中国平安", "综合金融龙头"), ("002594", "比亚迪", "新能源汽车龙头")]:
+            db.add(WatchlistItem(watchlist_id=watchlist.id, stock_code=code, stock_name=name, added_reason=reason))
+        await db.commit()
+    except Exception as e:
+        print(f"[Auth] Seed watchlist failed: {e}")
+        try: await db.rollback()
+        except: pass
+
+
+async def _seed_portfolio(user, db):
+    """Seed only portfolio for existing user"""
+    from db.models import Portfolio
+    try:
+        db.add(Portfolio(user_id=user.id, name="默认模拟盘", initial_capital=1000000.0, available_cash=1000000.0, total_value=1000000.0))
+        await db.commit()
+    except Exception as e:
+        print(f"[Auth] Seed portfolio failed: {e}")
+        try: await db.rollback()
+        except: pass
+
+
+async def _seed_scheduler_tasks(user, db):
+    """Seed only scheduler tasks for existing user"""
+    from db.models import ScheduledTask
+    try:
+        TASKS = [
+            {"name": "每日走势预测", "description": "每个工作日14:30, 预测自选股和大盘明日走势", "prompt": "分析自选股池中所有股票和大盘的当前走势, 预测明日走势方向。", "cron_expression": "cron(30 14 ? * MON-FRI *)"},
+            {"name": "每周预测验证", "description": "每周一9:00, 验证上周预测结果", "prompt": "回顾上周预测记录, 对比实际走势验证准确率, 总结经验。", "cron_expression": "cron(0 9 ? * MON *)"},
+            {"name": "每日A股分析", "description": "每个工作日15点, 全面分析A股市场", "prompt": "全面分析今日A股市场走势, 分析热点板块和资金流向, 给出操作建议。", "cron_expression": "cron(0 15 ? * MON-FRI *)"},
+            {"name": "每周买卖信号", "description": "每周一9点, 检查自选股买卖信号", "prompt": "检查自选股池中所有股票的技术指标和买卖信号, 生成信号报告。", "cron_expression": "cron(0 9 ? * MON *)"},
+        ]
+        for st in TASKS:
+            db.add(ScheduledTask(user_id=user.id, name=st["name"], description=st["description"], prompt=st["prompt"], cron_expression=st["cron_expression"], timezone="Asia/Shanghai", agent_type="orchestrator", notification_email=user.email or "", is_active=True))
+        await db.commit()
+    except Exception as e:
+        print(f"[Auth] Seed tasks failed: {e}")
+        try: await db.rollback()
+        except: pass

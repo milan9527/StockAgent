@@ -219,7 +219,25 @@ export default function QuantPage() {
             <button key={s} onClick={() => setAiPrompt(s)} className="text-[10px] px-2 py-1 bg-surface-hover rounded text-gray-500 hover:text-white">{s}</button>
           ))}
         </div>
-        {aiResult && <div className="mt-3 report-container p-4 bg-surface-hover rounded-lg border border-surface-border/50"><ReactMarkdown>{aiResult}</ReactMarkdown></div>}
+        {aiResult && (
+          <div className="mt-3">
+            <div className="flex items-center justify-end mb-2">
+              <button onClick={async () => {
+                try {
+                  await api.post('/api/documents/', {
+                    title: `AI量化: ${aiPrompt.slice(0, 40)}`,
+                    category: 'quant', content: aiResult,
+                    tags: ['quant', 'ai'], source: 'agent', add_to_kb: true,
+                  })
+                  toast.success('已保存到文档知识库')
+                } catch { toast.error('保存失败') }
+              }} className="text-[10px] px-2 py-1 bg-primary-500/20 text-primary-300 rounded hover:bg-primary-500/30">
+                保存到知识库
+              </button>
+            </div>
+            <div className="report-container p-4 bg-surface-hover rounded-lg border border-surface-border/50"><ReactMarkdown>{aiResult}</ReactMarkdown></div>
+          </div>
+        )}
       </div>
     </div>
   )

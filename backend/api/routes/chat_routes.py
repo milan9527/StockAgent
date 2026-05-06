@@ -144,7 +144,7 @@ async def chat_with_agent(
     # Inject user's watchlist stocks
     try:
         from api.user_context import build_user_context
-        user_ctx = await build_user_context(current_user, db)
+        user_ctx = await build_user_context(current_user, db, message=request.message)
         context_prompt = f"{user_ctx}\n\n{request.message}"
     except Exception:
         pass

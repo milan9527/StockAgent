@@ -181,36 +181,39 @@ async def run_task_now(
     task_email = task.notification_email
     user_id = current_user.id
 
-    # Inject user's watchlist stocks and current date into prompt for context
+    # Inject current date and conditionally load watchlist
     try:
         from db.models import Watchlist, WatchlistItem
         from datetime import datetime as _dt
-        wl_result = await db.execute(
-            select(Watchlist).where(Watchlist.user_id == current_user.id, Watchlist.is_default == True).limit(1)
-        )
-        default_wl = wl_result.scalar_one_or_none()
-        stock_list_str = ""
-        if default_wl:
-            items_result = await db.execute(
-                select(WatchlistItem).where(WatchlistItem.watchlist_id == default_wl.id)
-            )
-            items = items_result.scalars().all()
-            if items:
-                stock_list_str = ", ".join([f"{i.stock_name}({i.stock_code})" for i in items])
+        from api.user_context import _needs_watchlist
 
         task_prompt = (
             f"[当前日期: {_dt.now().strftime('%Y年%m月%d日 %H:%M')}]\n"
             f"[用户: {current_user.full_name or current_user.username}, "
             f"风险偏好: {current_user.risk_preference}]\n"
         )
-        if stock_list_str:
-            task_prompt += f"[自选股池: {stock_list_str}]\n"
+
+        # Only inject watchlist if the task prompt mentions it
+        if _needs_watchlist(task.prompt):
+            wl_result = await db.execute(
+                select(Watchlist).where(Watchlist.user_id == current_user.id, Watchlist.is_default == True).limit(1)
+            )
+            default_wl = wl_result.scalar_one_or_none()
+            if default_wl:
+                items_result = await db.execute(
+                    select(WatchlistItem).where(WatchlistItem.watchlist_id == default_wl.id)
+                )
+                items = items_result.scalars().all()
+                if items:
+                    stock_list_str = ", ".join([f"{i.stock_name}({i.stock_code})" for i in items])
+                    task_prompt += f"[自选股池: {stock_list_str}]\n"
+
         task_prompt += (
             f"\n重要: 不要使用训练数据中的旧信息, 必须通过工具获取最新实时数据。\n\n"
             f"{task.prompt}"
         )
     except Exception as e:
-        print(f"[Scheduler] Failed to inject watchlist: {e}")
+        print(f"[Scheduler] Failed to build prompt: {e}")
 
     async def generate():
         yield f"data: {_j.dumps({'type': 'ping', 'elapsed': 0})}\n\n"
@@ -307,15 +310,16 @@ async def _parse_task_description(description: str) -> dict:
 返回格式(只输出JSON, 不要其他内容):
 {{
   "name": "任务名称(简短)",
-  "cron": "EventBridge cron表达式, 格式: cron(分 时 日 月 星期 年), 注意北京时间需要减8小时转UTC",
+  "cron": "cron表达式, 格式: cron(分 时 日 月 星期 年), 直接使用北京时间, 不需要转换时区",
   "prompt": "给AI Agent的完整提示词",
   "schedule_desc": "人类可读的调度描述"
 }}
 
-常用cron示例:
-- 每个工作日北京时间15:00 = cron(0 7 ? * MON-FRI *)  (UTC 7:00)
-- 每天北京时间9:30 = cron(30 1 * * ? *)  (UTC 1:30)
-- 每周一北京时间8:00 = cron(0 0 ? * MON *)  (UTC 0:00)"""
+常用cron示例(北京时间):
+- 每个工作日北京时间15:00 = cron(0 15 ? * MON-FRI *)
+- 每天北京时间9:30 = cron(30 9 ? * * *)
+- 每周一北京时间9:00 = cron(0 9 ? * MON *)
+- 每周五北京时间15:00 = cron(0 15 ? * FRI *)"""
 
         body = _json.dumps({
             "anthropic_version": "bedrock-2023-05-31",

@@ -204,7 +204,7 @@ async def agent_analysis(
         # Build context with user's watchlist
         try:
             from api.user_context import build_user_context
-            user_ctx = await build_user_context(current_user, db)
+            user_ctx = await build_user_context(current_user, db, message=prompt)
             context = f"{user_ctx}\n\n{prompt}{registry_context}"
         except Exception:
             context = (

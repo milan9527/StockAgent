@@ -196,8 +196,8 @@ class ImportGithubRequest(BaseModel):
 
 @router.post("/import-github")
 async def import_from_github(request: ImportGithubRequest, current_user: User = Depends(get_current_user)):
-    """从GitHub URL导入Skill到Registry"""
-    import httpx, re
+    """从URL导入Skill到Registry (支持GitHub, LobeHub等)"""
+    import httpx, re, html as html_lib
 
     url = request.url
     try:
@@ -208,26 +208,78 @@ async def import_from_github(request: ImportGithubRequest, current_user: User = 
         elif "github.com" in url and "/tree/" in url:
             raw_url = url.replace("github.com", "raw.githubusercontent.com").replace("/tree/", "/") + "/SKILL.md"
 
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
             resp = await client.get(raw_url, headers={"User-Agent": "AgentSkillImporter/1.0"})
             resp.raise_for_status()
-            content = resp.text
+            raw_content = resp.text
 
-        # Parse name from YAML frontmatter
-        name = ""
-        desc = ""
-        if "---" in content:
-            parts = content.split("---")
-            if len(parts) >= 3:
-                name_match = re.search(r"name:\s*(.+)", parts[1])
-                desc_match = re.search(r"description:\s*(.+)", parts[1])
-                if name_match:
-                    name = name_match.group(1).strip().strip('"').strip("'")
-                if desc_match:
-                    desc = desc_match.group(1).strip().strip('"').strip("'")[:200]
+        # Determine if content is HTML or Markdown
+        is_html = raw_content.strip().startswith("<!") or "<html" in raw_content[:500].lower()
 
-        if not name:
-            name = url.split("/")[-1].replace(".md", "").replace("_", "-").lower()
+        if is_html:
+            # Extract skill info from HTML meta tags (LobeHub, etc.)
+            title_match = re.search(r'<meta property="og:title" content="(.*?)"', raw_content)
+            desc_match = re.search(r'<meta (?:property="og:description"|name="description") content="(.*?)"', raw_content)
+
+            name = ""
+            desc = ""
+            if title_match:
+                name = html_lib.unescape(title_match.group(1)).split("|")[0].strip().lower().replace(" ", "-")
+            if desc_match:
+                desc = html_lib.unescape(desc_match.group(1))
+
+            if not name:
+                # Extract from URL path
+                path_parts = url.rstrip("/").split("/")
+                name = path_parts[-1].replace("_", "-").lower()
+
+            # Build a proper SKILL.md from extracted metadata
+            content = f"""---
+name: {name}
+description: >
+  {desc[:300]}
+source: {url}
+---
+
+# {name}
+
+{desc}
+
+## Source
+
+Imported from: {url}
+"""
+        else:
+            # Raw markdown content (GitHub SKILL.md)
+            content = raw_content
+
+            # Parse name from YAML frontmatter
+            name = ""
+            desc = ""
+            if "---" in content:
+                parts = content.split("---")
+                if len(parts) >= 3:
+                    name_match = re.search(r"name:\s*(.+)", parts[1])
+                    desc_match = re.search(r"description:\s*(.+)", parts[1])
+                    if name_match:
+                        name = name_match.group(1).strip().strip('"').strip("'")
+                    if desc_match:
+                        desc = desc_match.group(1).strip().strip('"').strip("'")[:200]
+
+            if not name:
+                path_parts = url.rstrip("/").split("/")
+                name = path_parts[-1].replace(".md", "").replace("_", "-").lower()
+
+        # Sanitize content: remove null bytes and control characters
+        content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', content)
+
+        # Ensure content fits Registry limit (64KB)
+        if len(content.encode('utf-8')) > 60000:
+            content = content[:50000] + f"\n\n[Truncated. Full content at: {url}]"
+
+        if not desc:
+            lines = [l.strip() for l in content.split("\n") if l.strip() and not l.startswith(("#", "---", "```"))]
+            desc = (lines[0] if lines else f"Imported from {url}")[:200]
 
         # Publish to Registry
         if not REGISTRY_ID:
@@ -235,10 +287,10 @@ async def import_from_github(request: ImportGithubRequest, current_user: User = 
 
         ctrl = _get_ctrl_client()
         r = ctrl.create_registry_record(
-            registryId=REGISTRY_ID, name=name,
+            registryId=REGISTRY_ID, name=name[:100],
             descriptorType="AGENT_SKILLS",
             descriptors={"agentSkills": {"skillMd": {"inlineContent": content}}},
-            recordVersion="1.0.0", description=desc or f"Imported from {url}"[:200],
+            recordVersion="1.0.0", description=desc[:200],
         )
         record_id = r["recordArn"].split("/")[-1]
         time.sleep(1)
@@ -250,6 +302,153 @@ async def import_from_github(request: ImportGithubRequest, current_user: User = 
         return {"record_id": record_id, "name": name, "status": "PENDING_APPROVAL", "content_length": len(content)}
     except Exception as e:
         return {"error": f"导入失败: {str(e)[:200]}"}
+
+
+# ═══════════════════════════════════════════════════════
+# Import from uploaded file (zip or md)
+# ═══════════════════════════════════════════════════════
+
+from fastapi import UploadFile, File
+
+
+@router.post("/import-file")
+async def import_from_file(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """从上传文件导入Skill到Registry (支持 .zip, .md, .txt)"""
+    import re, zipfile, io
+
+    if not REGISTRY_ID:
+        return {"error": "Registry未配置"}
+
+    filename = file.filename or "unknown"
+    file_bytes = await file.read()
+
+    content = ""
+    name = ""
+    desc = ""
+
+    if filename.endswith(".zip"):
+        # Extract all relevant files from zip and combine into skill content
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                all_files = zf.namelist()
+                # Categorize files
+                md_files = [f for f in all_files if f.lower().endswith(".md") and not f.startswith("__")]
+                code_files = [f for f in all_files if f.lower().endswith((".py", ".js", ".ts")) and not f.startswith("__")]
+                config_files = [f for f in all_files if f.lower().endswith((".json", ".yaml", ".yml", ".toml")) and not f.startswith("__")]
+                example_files = [f for f in all_files if "example" in f.lower() or "sample" in f.lower() or "demo" in f.lower()]
+                txt_files = [f for f in all_files if f.lower().endswith(".txt") and not f.startswith("__")]
+
+                # Find primary SKILL.md
+                skill_md = next((f for f in md_files if "skill" in f.lower()), None)
+                readme_md = next((f for f in md_files if "readme" in f.lower()), None)
+                primary_md = skill_md or readme_md or (md_files[0] if md_files else None)
+
+                parts = []
+
+                # 1. Primary markdown (SKILL.md or README.md)
+                if primary_md:
+                    parts.append(zf.read(primary_md).decode("utf-8", errors="ignore"))
+
+                # 2. Other markdown files
+                for f in md_files:
+                    if f != primary_md:
+                        file_content = zf.read(f).decode("utf-8", errors="ignore")
+                        parts.append(f"\n\n---\n## {f}\n\n{file_content}")
+
+                # 3. Code examples (py, js, ts)
+                if code_files:
+                    parts.append("\n\n---\n## Code Examples\n")
+                    for f in code_files[:5]:  # Max 5 code files
+                        file_content = zf.read(f).decode("utf-8", errors="ignore")
+                        ext = f.rsplit(".", 1)[-1]
+                        parts.append(f"\n### {f}\n```{ext}\n{file_content[:20000]}\n```\n")
+
+                # 4. Config files
+                if config_files:
+                    parts.append("\n\n---\n## Configuration\n")
+                    for f in config_files[:3]:
+                        file_content = zf.read(f).decode("utf-8", errors="ignore")
+                        ext = f.rsplit(".", 1)[-1]
+                        parts.append(f"\n### {f}\n```{ext}\n{file_content[:20000]}\n```\n")
+
+                # 5. Example/sample files not already included
+                for f in example_files:
+                    if f not in md_files and f not in code_files and f not in config_files:
+                        try:
+                            file_content = zf.read(f).decode("utf-8", errors="ignore")
+                            parts.append(f"\n### {f}\n```\n{file_content[:20000]}\n```\n")
+                        except Exception:
+                            pass
+
+                # 6. If no md found, create from file listing
+                if not primary_md:
+                    file_list = "\n".join(f"- {f}" for f in all_files[:30])
+                    parts.insert(0, f"---\nname: {filename.replace('.zip', '')}\n---\n\n# {filename}\n\nFiles:\n{file_list}\n")
+
+                content = "\n".join(parts)
+        except zipfile.BadZipFile:
+            return {"error": "无效的ZIP文件"}
+
+    elif filename.endswith((".md", ".txt")):
+        content = file_bytes.decode("utf-8", errors="ignore")
+
+    else:
+        return {"error": f"不支持的文件格式: {filename}。支持 .zip, .md, .txt"}
+
+    if not content.strip():
+        return {"error": "文件内容为空"}
+
+    # Parse name and description from content
+    if "---" in content:
+        parts = content.split("---")
+        if len(parts) >= 3:
+            name_match = re.search(r"name:\s*(.+)", parts[1])
+            desc_match = re.search(r"description:\s*(.+)", parts[1])
+            if name_match:
+                name = name_match.group(1).strip().strip('"').strip("'")
+            if desc_match:
+                desc = desc_match.group(1).strip().strip('"').strip("'")[:200]
+
+    if not name:
+        name = filename.rsplit(".", 1)[0].replace("_", "-").replace(" ", "-").lower()
+
+    if not desc:
+        lines = [l.strip() for l in content.split("\n") if l.strip() and not l.startswith(("#", "---", "```"))]
+        desc = (lines[0] if lines else filename)[:200]
+
+    # Sanitize content
+    content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', content)
+    if len(content.encode('utf-8')) > 60000:
+        content = content[:50000] + f"\n\n[Truncated from {filename}]"
+
+    # Publish to Registry
+    try:
+        ctrl = _get_ctrl_client()
+        r = ctrl.create_registry_record(
+            registryId=REGISTRY_ID, name=name[:100],
+            descriptorType="AGENT_SKILLS",
+            descriptors={"agentSkills": {"skillMd": {"inlineContent": content}}},
+            recordVersion="1.0.0", description=desc[:200],
+        )
+        record_id = r["recordArn"].split("/")[-1]
+        time.sleep(1)
+        try:
+            ctrl.submit_registry_record_for_approval(registryId=REGISTRY_ID, recordId=record_id)
+        except Exception:
+            pass
+
+        return {
+            "record_id": record_id,
+            "name": name,
+            "status": "PENDING_APPROVAL",
+            "filename": filename,
+            "content_length": len(content),
+        }
+    except Exception as e:
+        return {"error": f"Registry创建失败: {str(e)[:200]}"}
 
 
 # ═══════════════════════════════════════════════════════

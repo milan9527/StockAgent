@@ -102,15 +102,17 @@ export default function SkillsPage() {
 
   const handleImportFile = async () => {
     if (!importFile) { toast.error('请选择文件'); return }
-    const text = await importFile.text()
-    const name = importFile.name.replace(/\.(md|json|yaml|yml)$/, '').replace(/[^a-z0-9-]/g, '-').toLowerCase()
     try {
-      const res = await api.post('/api/skills/registry', { name, description: `Imported from ${importFile.name}`, content: text })
+      const formData = new FormData()
+      formData.append('file', importFile)
+      const res = await api.post('/api/skills/import-file', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })
       if (res.data.error) { toast.error(res.data.error); return }
-      toast.success(`已导入: ${res.data.name}`)
+      toast.success(`已导入: ${res.data.name} (${res.data.content_length} bytes)`)
       setShowImport(false); setImportFile(null)
       loadRecords()
-    } catch { toast.error('导入失败') }
+    } catch (err: any) { toast.error(err.response?.data?.detail || '导入失败') }
   }
 
   const handleDelete = async (recordId: string) => {
@@ -174,9 +176,10 @@ export default function SkillsPage() {
               <button onClick={handleImportUrl} disabled={!importUrl} className="btn-primary text-sm w-full disabled:opacity-50">导入URL</button>
             </div>
             <div className="space-y-3">
-              <p className="text-xs text-gray-400">上传文件 (SKILL.md / MCP JSON)</p>
-              <input type="file" accept=".md,.json,.yaml,.yml,.txt" onChange={e => setImportFile(e.target.files?.[0] || null)}
+              <p className="text-xs text-gray-400">上传文件 (SKILL.md / ZIP / JSON)</p>
+              <input type="file" accept=".md,.zip,.json,.yaml,.yml,.txt" onChange={e => setImportFile(e.target.files?.[0] || null)}
                 className="input-field text-xs file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:bg-primary-500/20 file:text-primary-300 file:text-xs" />
+              <p className="text-[10px] text-gray-600">ZIP文件会自动查找其中的SKILL.md或README.md</p>
               <button onClick={handleImportFile} disabled={!importFile} className="btn-primary text-sm w-full disabled:opacity-50">上传导入</button>
             </div>
           </div>

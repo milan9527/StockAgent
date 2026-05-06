@@ -1,16 +1,23 @@
 """
 AgentCore Runtime Client
 Backend通过此客户端调用部署在AgentCore Runtime上的Agent
+防止重复调用: 使用session_id去重
 """
 from __future__ import annotations
 
 import os
 import json
+import threading
 import boto3
 from botocore.config import Config as BotoConfig
 from config.settings import get_settings
 
 settings = get_settings()
+
+# In-memory lock to prevent duplicate invocations for the same session
+_active_sessions: dict[str, threading.Event] = {}
+_session_results: dict[str, str] = {}
+_session_lock = threading.Lock()
 
 
 def _get_agent_arn() -> str:
@@ -46,22 +53,63 @@ def invoke_runtime_agent(
     session_id: str = "default",
     user_id: str = "anonymous",
 ) -> str:
-    """调用AgentCore Runtime上的Agent"""
-    agent_arn = _get_agent_arn()
-    if not agent_arn:
-        # Fallback: 本地直接调用
-        return _invoke_local(prompt, session_id, user_id)
+    """调用AgentCore Runtime上的Agent
+    包含去重逻辑: 相同session_id的请求不会重复调用Agent
+    """
+    # Deduplication: if same session is already running, wait for its result
+    with _session_lock:
+        if session_id in _active_sessions:
+            print(f"[RuntimeClient] Session {session_id[:40]} already running, waiting for result...")
+            event = _active_sessions[session_id]
+        else:
+            event = None
+
+    if event:
+        # Wait for the existing invocation to complete (max 10 min)
+        event.wait(timeout=600)
+        result = _session_results.get(session_id, "")
+        if result:
+            print(f"[RuntimeClient] Returning cached result for {session_id[:40]}")
+            return result
+        # If no result after waiting, proceed with new invocation
+
+    # Mark session as active
+    done_event = threading.Event()
+    with _session_lock:
+        _active_sessions[session_id] = done_event
 
     try:
-        return _invoke_runtime(agent_arn, prompt, session_id, user_id)
+        agent_arn = _get_agent_arn()
+        if not agent_arn:
+            result = _invoke_local(prompt, session_id, user_id)
+        else:
+            try:
+                result = _invoke_runtime(agent_arn, prompt, session_id, user_id)
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[RuntimeClient] Runtime invoke failed: {error_msg}")
+                if "not found" in error_msg.lower() or "not ready" in error_msg.lower():
+                    result = _invoke_local(prompt, session_id, user_id)
+                else:
+                    raise
+
+        # Cache result and signal waiting threads
+        with _session_lock:
+            _session_results[session_id] = result
+        done_event.set()
+        return result
     except Exception as e:
-        error_msg = str(e)
-        print(f"[RuntimeClient] Runtime invoke failed: {error_msg}")
-        # 如果Runtime调用失败，fallback到本地
-        if "not found" in error_msg.lower() or "not ready" in error_msg.lower():
-            print("[RuntimeClient] Falling back to local agent")
-            return _invoke_local(prompt, session_id, user_id)
+        done_event.set()
         raise
+    finally:
+        # Clean up after 5 min
+        def _cleanup():
+            import time
+            time.sleep(300)
+            with _session_lock:
+                _active_sessions.pop(session_id, None)
+                _session_results.pop(session_id, None)
+        threading.Thread(target=_cleanup, daemon=True).start()
 
 
 def _invoke_local(prompt: str, session_id: str, user_id: str) -> str:

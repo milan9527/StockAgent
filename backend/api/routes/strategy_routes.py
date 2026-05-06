@@ -226,6 +226,29 @@ async def run_strategy_backtest(
 
 
 # ═══════════════════════════════════════════════════════
+# 应用策略到股票/自选股
+# ═══════════════════════════════════════════════════════
+
+@router.delete("/trading/{strategy_id}")
+async def delete_trading_strategy(
+    strategy_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除交易策略"""
+    result = await db.execute(
+        select(TradingStrategy).where(TradingStrategy.id == strategy_id, TradingStrategy.user_id == current_user.id)
+    )
+    existing = result.scalar_one_or_none()
+    if not existing:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="策略不存在")
+    await db.delete(existing)
+    await db.commit()
+    return {"success": True}
+
+
+# ═══════════════════════════════════════════════════════
 # AI Agent 策略助手 (通过Runtime + Registry Smart Select)
 # ═══════════════════════════════════════════════════════
 
@@ -278,7 +301,7 @@ async def agent_strategy(
     skill_hint = "trading-skill, market-data-skill, notification-skill" if request.module == "trading" else "quant-skill, market-data-skill, code-interpreter-skill"
     try:
         from api.user_context import build_user_context
-        user_ctx = await build_user_context(current_user, db)
+        user_ctx = await build_user_context(current_user, db, message=request.prompt)
         context = (
             f"{user_ctx}\n"
             f"[模块: {'交易策略' if request.module == 'trading' else '量化交易'}]\n"
@@ -322,11 +345,12 @@ async def agent_strategy(
         except Exception as e:
             response_text = f"Agent错误: {str(e)[:300]}"
 
-        # Auto-save to documents
+        # Auto-save to documents + auto-create strategy if applicable
         try:
             from db.database import AsyncSessionLocal
-            from db.models import Document
+            from db.models import Document, TradingStrategy, QuantStrategy, StrategyStatus
             async with AsyncSessionLocal() as save_db:
+                # Save to documents
                 doc = Document(
                     user_id=user_id,
                     title=f"[{'交易策略' if request.module == 'trading' else '量化分析'}] {request.prompt[:60]}",
@@ -338,9 +362,61 @@ async def agent_strategy(
                     source="agent",
                 )
                 save_db.add(doc)
+
+                # Auto-create TradingStrategy if prompt is about creating/designing a strategy
+                if request.module == "trading" and response_text and len(response_text) > 100:
+                    create_keywords = ["创建", "制定", "设计", "生成", "建立", "构建", "策略"]
+                    prompt_lower = request.prompt.lower()
+                    if any(kw in request.prompt for kw in create_keywords) and "策略" in request.prompt:
+                        # Extract strategy info from prompt and response
+                        strategy_name = request.prompt[:50].replace("创建", "").replace("制定", "").replace("设计", "").replace("生成", "").strip()
+                        if not strategy_name or len(strategy_name) < 3:
+                            strategy_name = f"AI策略 - {request.prompt[:30]}"
+
+                        # Parse buy/sell conditions from response
+                        buy_conditions = []
+                        sell_conditions = []
+                        indicators = []
+                        lines = response_text.split("\n")
+                        section = ""
+                        for line in lines:
+                            line_stripped = line.strip().lstrip("#").strip()
+                            if "买入" in line_stripped and ("条件" in line_stripped or "信号" in line_stripped):
+                                section = "buy"
+                            elif "卖出" in line_stripped and ("条件" in line_stripped or "信号" in line_stripped):
+                                section = "sell"
+                            elif "指标" in line_stripped:
+                                section = "ind"
+                            elif line.strip().startswith(("-", "•", "*", "1", "2", "3", "4", "5")):
+                                content = line.strip().lstrip("-•*0123456789.").strip()
+                                if content and len(content) > 2:
+                                    if section == "buy":
+                                        buy_conditions.append(content[:100])
+                                    elif section == "sell":
+                                        sell_conditions.append(content[:100])
+
+                        # Detect indicators from prompt/response
+                        for ind in ["MA", "MACD", "KDJ", "RSI", "BOLL", "均线", "布林"]:
+                            if ind in request.prompt or ind in response_text[:500]:
+                                indicators.append(ind)
+
+                        new_strategy = TradingStrategy(
+                            user_id=user_id,
+                            name=strategy_name[:100],
+                            description=request.prompt[:200],
+                            strategy_type="technical",
+                            parameters={},
+                            indicators=indicators[:10] or ["MA", "MACD", "KDJ"],
+                            buy_conditions=buy_conditions[:10] or [request.prompt[:100]],
+                            sell_conditions=sell_conditions[:10] or ["止损-5%", "目标收益达到"],
+                            risk_rules={"max_position_pct": 0.3, "stop_loss_pct": 0.05},
+                            status=StrategyStatus.DRAFT,
+                        )
+                        save_db.add(new_strategy)
+
                 await save_db.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Strategy Agent] Auto-save failed: {e}")
 
         result = _json.dumps({"type": "result", "response": response_text}, ensure_ascii=False)
         yield f"data: {result}\n\n"

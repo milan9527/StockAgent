@@ -24,7 +24,7 @@ _scheduler: Optional[AsyncIOScheduler] = None
 def get_scheduler() -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
-        _scheduler = AsyncIOScheduler(timezone="UTC")
+        _scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
     return _scheduler
 
 
@@ -45,10 +45,13 @@ async def start_scheduler():
                 _add_job(scheduler, task)
             print(f"[Scheduler] Loaded {len(tasks)} active tasks")
     except Exception as e:
-        print(f"[Scheduler] Failed to load tasks: {e}")
+        print(f"[Scheduler] Failed to load tasks (will retry on next request): {e}")
 
-    scheduler.start()
-    print("[Scheduler] APScheduler started")
+    try:
+        scheduler.start()
+        print("[Scheduler] APScheduler started")
+    except Exception as e:
+        print(f"[Scheduler] Failed to start: {e}")
 
 
 async def stop_scheduler():
@@ -83,7 +86,7 @@ def _parse_cron_expression(cron_expr: str) -> Optional[CronTrigger]:
 
         return CronTrigger(
             minute=minute, hour=hour, day=day, month=month, day_of_week=dow,
-            timezone="UTC",
+            timezone="Asia/Shanghai",
         )
     except Exception as e:
         print(f"[Scheduler] Failed to parse cron '{cron_expr}': {e}")
